@@ -1,0 +1,16 @@
+{
+  "name": "chrome",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH plugin: drive a dedicated visible Chrome window, read its accessibility tree, and capture screenshots the model can see.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
