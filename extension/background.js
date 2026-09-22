@@ -1,4 +1,4 @@
-import { GROUP_TITLE, HOST_NAME, ignoreFocusMethod, tabCreateProperties, windowCreateProperties } from "./policy.js";
+import { GROUP_TITLE, HOST_NAME, groupTitle, ignoreFocusMethod, tabCreateProperties, windowCreateProperties } from "./policy.js";
 
 const sessions = new Map();
 let port = null;
@@ -27,8 +27,14 @@ function postEvent(message) {
   post(message);
 }
 
-async function groupTab(tabId, windowId) {
-  const existing = await chrome.tabGroups.query({ title: GROUP_TITLE, windowId });
+function ownerOf(params) {
+  const owner = params && params.dshOwner;
+  return typeof owner === "string" && owner.trim() ? owner.trim() : "default";
+}
+
+async function groupTab(tabId, windowId, owner) {
+  const title = groupTitle(owner);
+  const existing = await chrome.tabGroups.query({ title, windowId });
   if (existing[0]) {
     await chrome.tabs.group({ groupId: existing[0].id, tabIds: tabId });
     return existing[0].id;
@@ -37,7 +43,7 @@ async function groupTab(tabId, windowId) {
     tabIds: tabId,
     createProperties: { windowId },
   });
-  await chrome.tabGroups.update(groupId, { title: GROUP_TITLE, color: "blue", collapsed: true });
+  await chrome.tabGroups.update(groupId, { title, color: "blue", collapsed: true });
   return groupId;
 }
 
@@ -53,32 +59,32 @@ async function attachTab(tabId) {
   return { sessionId, targetId: sessionId };
 }
 
-async function createTarget(url) {
+async function createTarget(url, owner) {
   const wins = await chrome.windows.getAll({ windowTypes: ["normal"] });
   const focused = wins.find((win) => win.focused) || wins[0];
   if (!focused) {
     const created = await chrome.windows.create(windowCreateProperties(url || "about:blank"));
     const tab = created?.tabs?.find((item) => item.id != null);
     if (created?.id == null || tab?.id == null) throw new Error("Chrome has no normal window");
-    await groupTab(tab.id, created.id);
+    await groupTab(tab.id, created.id, owner);
     return { targetId: sessionIdFor(tab.id) };
   }
   const tab = await chrome.tabs.create(tabCreateProperties(focused.id, url));
   if (tab.id == null) throw new Error("Chrome did not return a tab id");
-  await groupTab(tab.id, tab.windowId ?? focused.id);
+  await groupTab(tab.id, tab.windowId ?? focused.id, owner);
   return { targetId: sessionIdFor(tab.id) };
 }
 
-async function listAgentTabs() {
-  const groups = await chrome.tabGroups.query({ title: GROUP_TITLE });
+async function listAgentTabs(owner) {
+  const groups = await chrome.tabGroups.query({ title: groupTitle(owner) });
   const groupIds = new Set(groups.map((group) => group.id));
   if (groupIds.size === 0) return [];
   const tabs = await chrome.tabs.query({});
   return tabs.filter((tab) => tab.id != null && groupIds.has(tab.groupId));
 }
 
-async function closeAgentTabs() {
-  const tabs = await listAgentTabs();
+async function closeAgentTabs(owner) {
+  const tabs = await listAgentTabs(owner);
   const ids = tabs.map((tab) => tab.id).filter((id) => id != null);
   await Promise.all(ids.map(async (tabId) => {
     try {
@@ -101,8 +107,8 @@ function downloadRow(item) {
   };
 }
 
-async function agentDownloadItems() {
-  const tabs = await listAgentTabs();
+async function agentDownloadItems(owner) {
+  const tabs = await listAgentTabs(owner);
   const tabIds = new Set(tabs.map((tab) => tab.id));
   const items = await chrome.downloads.search({ limit: 20, orderBy: ["-startTime"] });
   return items.filter((item) => item.tabId != null && tabIds.has(item.tabId)).map(downloadRow);
@@ -111,6 +117,7 @@ async function agentDownloadItems() {
 async function handle(message) {
   const method = String(message.method || "");
   const params = message.params || {};
+  const owner = ownerOf(params);
   if (method === "DSH.hello") return { ok: true, group: GROUP_TITLE };
   if (ignoreFocusMethod(method)) return {};
   if (message.sessionId) {
@@ -120,9 +127,9 @@ async function handle(message) {
   }
   if (method === "Target.setDiscoverTargets") return {};
   if (method === "Browser.setDownloadBehavior") return {};
-  if (method === "Browser.getDownloadItems") return { items: await agentDownloadItems() };
+  if (method === "Browser.getDownloadItems") return { items: await agentDownloadItems(owner) };
   if (method === "Target.getTargets") {
-    const tabs = await listAgentTabs();
+    const tabs = await listAgentTabs(owner);
     return {
       targetInfos: tabs.map((tab) => ({
         targetId: sessionIdFor(tab.id),
@@ -133,7 +140,7 @@ async function handle(message) {
       })),
     };
   }
-  if (method === "Target.createTarget") return createTarget(params.url);
+  if (method === "Target.createTarget") return createTarget(params.url, owner);
   if (method === "Target.attachToTarget") return attachTab(tabIdFrom(params.targetId));
   if (method === "Target.closeTarget") {
     const tabId = tabIdFrom(params.targetId);
@@ -161,7 +168,7 @@ async function handle(message) {
     };
   }
   if (method === "Browser.setWindowBounds") return {};
-  if (method === "Browser.close") return closeAgentTabs();
+  if (method === "Browser.close") return closeAgentTabs(owner);
   throw new Error(`unsupported browser command ${method}`);
 }
 
@@ -215,7 +222,7 @@ chrome.debugger.onDetach.addListener((source) => {
 
 chrome.downloads.onCreated.addListener((item) => {
   if (item.tabId == null || !sessions.has(sessionIdFor(item.tabId))) return;
-  postEvent({ method: "Browser.downloadWillBegin", params: downloadRow(item) });
+  postEvent({ method: "Browser.downloadWillBegin", params: downloadRow(item), sessionId: sessionIdFor(item.tabId) });
 });
 
 chrome.downloads.onChanged.addListener((delta) => {
@@ -223,7 +230,7 @@ chrome.downloads.onChanged.addListener((delta) => {
   chrome.downloads.search({ id: delta.id }).then((items) => {
     const item = items[0];
     if (!item || item.tabId == null || !sessions.has(sessionIdFor(item.tabId))) return;
-    postEvent({ method: "Browser.downloadProgress", params: downloadRow(item) });
+    postEvent({ method: "Browser.downloadProgress", params: downloadRow(item), sessionId: sessionIdFor(item.tabId) });
   }).catch(() => {});
 });
 

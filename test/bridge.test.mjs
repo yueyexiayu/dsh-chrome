@@ -8,7 +8,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createFrameParser, encodeFrame } from "../lib/frame.js";
 import { EXTENSION_ID, HOST_NAME, nativeHostManifest, pluginRoot } from "../lib/install.js";
-import { GROUP_TITLE, ignoreFocusMethod, tabCreateProperties, windowCreateProperties } from "../extension/policy.js";
+import { GROUP_TITLE, groupTitle, ignoreFocusMethod, tabCreateProperties, windowCreateProperties } from "../extension/policy.js";
+import { contextKey } from "../lib/owner.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -39,11 +40,21 @@ test("native host manifest is bound to this extension", () => {
   assert.equal(manifest.path, path.join(pluginRoot(), "host", "dsh-chrome-host"));
 });
 
+test("conversations get separate tab groups", () => {
+  assert.equal(groupTitle("session-aaaaaa"), "DSH aaaaaa");
+  assert.notEqual(groupTitle("session-aaaaaa"), groupTitle("session-bbbbbb"));
+  assert.equal(groupTitle("session-aaaaaa"), groupTitle("session-aaaaaa"));
+  assert.equal(contextKey({ agent: { session: { id: "sess-123456" } } }), "sess-123456");
+  assert.equal(contextKey({}), "default");
+  assert.equal(GROUP_TITLE, "DSH");
+});
+
 test("extension source does not activate a tab or window", () => {
   const source = readFileSync(path.join(root, "extension", "background.js"), "utf8");
   assert.match(source, /tabCreateProperties\(/);
   assert.match(source, /windowCreateProperties\(/);
   assert.match(source, /ignoreFocusMethod\(/);
+  assert.match(source, /groupTitle\(owner\)/);
   assert.doesNotMatch(source, /active:\s*true/);
   assert.doesNotMatch(source, /focused:\s*true/);
   assert.doesNotMatch(source, /bringToFront/);

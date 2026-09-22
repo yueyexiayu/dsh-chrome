@@ -30,9 +30,9 @@ DeepSeek Harness 桌面插件。通过本机 Chrome 扩展，在**当前 Chrome*
 ## 说明
 
 - 纯 Host 插件，没有 Client UI。工具以 `chrome_` 开头
-- 新标签用 `active: false` 创建，放进标题为 `DSH` 的标签组，并保持折叠。不会调用 `Page.bringToFront`，也不会把窗口设为 focused
-- 只操作这个标签组里的标签，不列出、不切换你正在看的其他标签
-- `chrome_close` 只关掉 DSH 标签组，不退出 Chrome
+- 每个对话单独一个折叠标签组，标题是 `DSH` 加会话 id 末 6 位。不会复用另一个对话的标签，也不会调用 `Page.bringToFront`
+- 只操作本对话标签组里的标签，不列出、不切换你正在看的其他标签
+- `chrome_close` 只关掉本对话的标签组，不退出 Chrome，也不关其他对话的组
 - `chrome_resize` 不改窗口大小，避免 macOS 把 Chrome 激活
 - `chrome_screenshot` 把 PNG 交回模型并落盘；配合 `zhanshi` 可在本轮对话里预览
 - 元素引用（ref）来自最近一次 `chrome_snapshot` / `chrome_query` / `chrome_find` / `chrome_a11y`；这几次调用都会重新编号
