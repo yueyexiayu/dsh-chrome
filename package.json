@@ -2,7 +2,7 @@
   "name": "chrome",
   "version": "0.1.0",
   "private": true,
-  "description": "DSH plugin: drive a dedicated visible Chrome window, read its accessibility tree, and capture screenshots the model can see.",
+  "description": "DSH plugin: drive background tabs in the current Chrome without stealing focus.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
