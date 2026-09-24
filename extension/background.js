@@ -1,5 +1,5 @@
 import { GROUP_TITLE, HOST_NAME, canPick, groupTitle, ignoreFocusMethod, tabCreateProperties, windowCreateProperties } from "./policy.js";
-import { jpegCrop } from "./shot.js";
+import { jpegBoxes, jpegCrop } from "./shot.js";
 
 const sessions = new Map();
 let port = null;
@@ -309,14 +309,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function captureAndSend(tab, message) {
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-  const image = await jpegCrop(dataUrl, message.box, message.viewport);
+  const items = Array.isArray(message.items) ? message.items.filter((item) => item && item.box) : [];
+  const image = items.length
+    ? await jpegBoxes(dataUrl, items.map((item) => item.box), message.viewport)
+    : await jpegCrop(dataUrl, message.box, message.viewport);
+  const first = items[0] || {};
   postMark({
     url: message.url,
     title: message.title,
-    selector: message.selector,
-    role: message.role,
-    name: message.name,
-    text: message.text,
+    selector: message.selector || first.selector,
+    role: message.role || first.role,
+    name: message.name || first.name,
+    text: message.text || first.text,
+    items,
     image,
   });
 }
