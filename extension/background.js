@@ -268,6 +268,26 @@ chrome.action.onClicked.addListener(async (tab) => {
   }
 });
 
+chrome.runtime.onConnect.addListener((port) => {
+  if (!port || port.name !== "dsh-pick") return;
+  port.onMessage.addListener((message) => {
+    const tab = port.sender && port.sender.tab;
+    if (!message || tab?.id == null || tab.windowId == null || !canPick(message.url)) {
+      port.postMessage({ ok: false, error: "这个页面不能标注" });
+      return;
+    }
+    captureAndSend(tab, message)
+      .then(() => {
+        flash("✓");
+        port.postMessage({ ok: true });
+      })
+      .catch((error) => {
+        flash("!");
+        port.postMessage({ ok: false, error: error instanceof Error ? error.message : "没送出" });
+      });
+  });
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== "dsh-pick") return;
   const tab = sender.tab;
