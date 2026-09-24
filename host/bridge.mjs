@@ -3,6 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createFrameParser, encodeFrame } from "../lib/frame.js";
+import { saveMark } from "../lib/marks.js";
 
 const home = process.env.DSH_HOME || path.join(os.homedir(), ".dsh");
 const sock = path.join(home, "cache", "dsh-chrome.sock");
@@ -20,6 +21,14 @@ function writeNative(message) {
 }
 
 const fromExtension = createFrameParser((message) => {
+  if (message && message.method === "DSH.mark") {
+    try {
+      saveMark(home, message.params || {});
+    } catch (error) {
+      process.stderr.write(`dsh-chrome-host: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+    return;
+  }
   if (!client || client.destroyed) return;
   client.write(encodeFrame(message));
 });

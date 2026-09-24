@@ -26,3 +26,7 @@ export function windowCreateProperties(url) {
     type: "normal",
   };
 }
+
+export function canPick(url) {
+  return /^https?:\/\//i.test(String(url || ""));
+}

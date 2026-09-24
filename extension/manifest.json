@@ -1,11 +1,14 @@
 {
   "manifest_version": 3,
   "name": "DSH Chrome",
-  "version": "0.1.0",
-  "description": "Lets DeepSeek Harness drive background tabs in this Chrome without stealing focus.",
+  "version": "0.2.0",
+  "description": "Lets DeepSeek Harness drive background tabs, and send a picked element into the current DSH composer.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAl4KQUzz/H/xWznvszHbd/nFvLwprSu7zfLVBALykof5WoBFowzX7oL0EmjTWTVG0F93uXAXXDSJQiPqHOlTnWJ8G0iU2m6rOZLhUJtOIGZ8fAldcou2Rhc562SOtGexKVMQmexYd+iXUw2redkiqwr6DVG/kDBSWYklnb2huV5asy6VAMlggRBu3v0QfBwcc37Or97NE/JdF346sSKOypXKtr2PqtYfkZo5zFbXsPvUtNzCdknraB5vGTnutqH/H4YHc8P03QNDR2xZlhcanZlBvVbT9k4PZYrvlty12oE2eJ9sExbIZmpZ18FZfqs4vJ12FRpHDekFCol4kRGsbWwIDAQAB",
   "minimum_chrome_version": "116",
-  "permissions": ["debugger", "tabs", "tabGroups", "nativeMessaging", "downloads"],
+  "permissions": ["debugger", "tabs", "tabGroups", "nativeMessaging", "downloads", "scripting", "activeTab"],
+  "action": {
+    "default_title": "发给 DSH"
+  },
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js",

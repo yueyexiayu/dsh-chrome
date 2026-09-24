@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,7 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createFrameParser, encodeFrame } from "../lib/frame.js";
 import { EXTENSION_ID, HOST_NAME, nativeHostManifest, pluginRoot } from "../lib/install.js";
-import { GROUP_TITLE, groupTitle, ignoreFocusMethod, tabCreateProperties, windowCreateProperties } from "../extension/policy.js";
+import { GROUP_TITLE, canPick, groupTitle, ignoreFocusMethod, tabCreateProperties, windowCreateProperties } from "../extension/policy.js";
 import { contextKey } from "../lib/owner.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -47,6 +47,47 @@ test("conversations get separate tab groups", () => {
   assert.equal(contextKey({ agent: { session: { id: "sess-123456" } } }), "sess-123456");
   assert.equal(contextKey({}), "default");
   assert.equal(GROUP_TITLE, "DSH");
+});
+
+test("host stores a page mark without forwarding it to the tool socket", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "dsh-chrome-"));
+  const child = spawn(path.join(root, "host", "dsh-chrome-host"), {
+    cwd: root,
+    env: { ...process.env, DSH_HOME: home },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const sock = path.join(home, "cache", "dsh-chrome.sock");
+  const socket = await waitForConnect(sock);
+  try {
+    const fromHost = collect(child.stdout);
+    const fromSocket = collect(socket);
+    child.stdin.write(encodeFrame({
+      method: "DSH.mark",
+      params: { url: "https://example.com", selector: "#box", image: "aGVsbG8=" },
+    }));
+    socket.write(encodeFrame({ id: 3, method: "DSH.hello" }));
+    assert.deepEqual(await fromHost.next(), { id: 3, method: "DSH.hello" });
+    child.stdin.write(encodeFrame({ id: 3, result: { ok: true } }));
+    assert.deepEqual(await fromSocket.next(), { id: 3, result: { ok: true } });
+    const dir = path.join(home, "cache", "dsh-chrome-marks");
+    let names = [];
+    for (let i = 0; i < 20 && names.length === 0; i += 1) {
+      try {
+        names = readdirSync(dir).filter((name) => name.endsWith(".json"));
+      } catch {
+        names = [];
+      }
+      if (names.length === 0) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(names.length, 1);
+    const saved = JSON.parse(readFileSync(path.join(dir, names[0]), "utf8"));
+    assert.equal(saved.url, "https://example.com");
+    assert.match(saved.prompt, /不是指令/);
+    assert.equal(canPick(saved.url), true);
+  } finally {
+    socket.destroy();
+    child.kill();
+  }
 });
 
 test("extension source does not activate a tab or window", () => {

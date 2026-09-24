@@ -1,4 +1,5 @@
-import { GROUP_TITLE, HOST_NAME, groupTitle, ignoreFocusMethod, tabCreateProperties, windowCreateProperties } from "./policy.js";
+import { GROUP_TITLE, HOST_NAME, canPick, groupTitle, ignoreFocusMethod, tabCreateProperties, windowCreateProperties } from "./policy.js";
+import { jpegCrop } from "./shot.js";
 
 const sessions = new Map();
 let port = null;
@@ -237,6 +238,68 @@ chrome.downloads.onChanged.addListener((delta) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   sessions.delete(sessionIdFor(tabId));
 });
+
+function flash(text) {
+  chrome.action.setBadgeText({ text }).catch(() => {});
+  chrome.action.setBadgeBackgroundColor({ color: text === "!" ? "#c92a2a" : "#2f9e44" }).catch(() => {});
+  setTimeout(() => {
+    chrome.action.setBadgeText({ text: "" }).catch(() => {});
+  }, 1600);
+}
+
+function postMark(params) {
+  if (!port) connect();
+  if (!port) throw new Error("DSH Chrome 主机没连上");
+  const message = { method: "DSH.mark", params };
+  if (JSON.stringify(message).length > 900_000) throw new Error("标注图太大");
+  port.postMessage(message);
+}
+
+chrome.action.onClicked.addListener(async (tab) => {
+  if (tab?.id == null || !canPick(tab.url)) {
+    flash("!");
+    return;
+  }
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["picker.js"] });
+    await chrome.tabs.sendMessage(tab.id, { type: "dsh-pick-start" });
+  } catch {
+    flash("!");
+  }
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || message.type !== "dsh-pick") return;
+  const tab = sender.tab;
+  if (tab?.id == null || tab.windowId == null || !canPick(message.url)) {
+    sendResponse({ ok: false, error: "这个页面不能标注" });
+    return;
+  }
+  captureAndSend(tab, message)
+    .then(() => {
+      flash("✓");
+      sendResponse({ ok: true });
+    })
+    .catch((error) => {
+      flash("!");
+      sendResponse({ ok: false, error: error instanceof Error ? error.message : "没送出" });
+    });
+  return true;
+});
+
+async function captureAndSend(tab, message) {
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  const image = await jpegCrop(dataUrl, message.box, message.viewport);
+  postMark({
+    url: message.url,
+    title: message.title,
+    selector: message.selector,
+    role: message.role,
+    name: message.name,
+    text: message.text,
+    image,
+  });
+}
 
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);

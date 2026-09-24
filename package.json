@@ -2,15 +2,23 @@
   "name": "chrome",
   "version": "0.1.0",
   "private": true,
-  "description": "DSH plugin: drive background tabs in the current Chrome without stealing focus.",
+  "description": "DSH plugin: drive background tabs in the current Chrome, and send a picked element into the composer.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
-    ".": "./lib/index.js"
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
   }
 }

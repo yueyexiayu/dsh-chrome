@@ -29,7 +29,7 @@ DeepSeek Harness 桌面插件。通过本机 Chrome 扩展，在**当前 Chrome*
 
 ## 说明
 
-- 纯 Host 插件，没有 Client UI。工具以 `chrome_` 开头
+- 工具以 `chrome_` 开头。标注由 Client 放进当前会话输入框，不另做可见面板
 - 每个对话单独一个折叠标签组，标题是 `DSH` 加会话 id 末 6 位。不会复用另一个对话的标签，也不会调用 `Page.bringToFront`
 - 只操作本对话标签组里的标签，不列出、不切换你正在看的其他标签
 - `chrome_close` 只关掉本对话的标签组，不退出 Chrome，也不关其他对话的组
@@ -40,9 +40,17 @@ DeepSeek Harness 桌面插件。通过本机 Chrome 扩展，在**当前 Chrome*
 - 点击、输入和查询只作用在顶层页面；跨源 iframe 里的内容不可见
 - 下载进当前 Chrome 的下载目录。cookie / storage 默认不返回值；名字像 token 或密码的项始终打码
 
+## 标注
+
+点 Chrome 工具栏里的 DSH Chrome（悬停是「发给 DSH」）。只在当前 http 或 https 页面上选：悬停出框，点击锁定，不会打开链接。上一层选外层容器，再点发给 DSH。Esc 取消。再点一次图标也取消。
+
+截下带红框的区域，连同 URL 和选择器放进当前 DSH 会话的输入框，不自动发送。页面文字标成数据，不是指令。不用调试器，也不操作你正在看的标签。`chrome://` 和扩展页不能选。
+
+改了 `extension/` 之后，在扩展卡片上点重新加载。改了 Host 或 Client 后，完全退出 DeepSeek Harness（⌘Q）再打开。
+
 ## 开发
 
 ```bash
-node --check lib/index.js lib/browser.js lib/page.js lib/tools.js lib/bridge-client.js lib/install.js extension/background.js
+node --check lib/index.js lib/browser.js lib/page.js lib/tools.js lib/bridge-client.js lib/install.js lib/marks.js extension/background.js extension/picker.js extension/shot.js extension/crop.js host/bridge.mjs
 node --test
 ```
