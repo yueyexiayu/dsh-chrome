@@ -322,6 +322,9 @@ async function captureAndSend(tab, message) {
     name: message.name || first.name,
     text: message.text || first.text,
     items,
+    viewport: message.viewport
+      ? `${Math.round(Number(message.viewport.width) || 0)}x${Math.round(Number(message.viewport.height) || 0)}`
+      : "",
     image,
   });
 }
