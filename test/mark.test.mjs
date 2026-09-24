@@ -60,6 +60,7 @@ test("a mark is saved once and page text is labeled as data", () => {
         bounds: "x=1, y=2, 10x20",
         styles: { width: "1200px", display: "block" },
         html: "<img alt=\"甲\">",
+        note: "把标题改小",
       },
       { selector: "#b", name: "乙" },
     ],
@@ -73,6 +74,7 @@ test("a mark is saved once and page text is labeled as data", () => {
   assert.match(many.prompt, /Bounds:.*x=1, y=2, 10x20/);
   assert.match(many.prompt, /- width: 1200px/);
   assert.match(many.prompt, /<img alt="甲">/);
+  assert.match(many.prompt, /Request:.*把标题改小/);
   assert.equal(markPrompt(saved), saved.prompt);
   assert.equal(markPrompt(many), many.prompt);
   const ids = [takeMark(home).id, takeMark(home).id].sort();
