@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { cropSource } from "../extension/crop.js";
 import { canPick } from "../extension/policy.js";
 import { markPrompt, saveMark, peekMark, ackMark, releaseMark, marksDir } from "../lib/marks.js";
+import * as defaultHost from "../lib/marks.js";
 import { runInNewContext } from "node:vm";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -165,18 +166,23 @@ let consumerNumber = 0;
 async function clientFixture(options = {}) {
   const home = options.home || mkdtempSync(path.join(tmpdir(), "dsh-chrome-client-mark-"));
   const mark = options.mark || saveMark(home, { url: "https://fixture.invalid/", image: "aGVsbG8=", note: "fixture" });
-  const snapshot = { phase: "plain", draft: "", draftRev: 0, attachmentIds: [] };
+  const host = options.host || defaultHost;
+  const snapshot = options.snapshot || { phase: "plain", draft: "", draftRev: 0, attachmentIds: [] };
   const notices = [];
-  const drafts = new Map();
-  const stats = { insertions: 0, created: 0, released: 0, acknowledgments: 0, releases: 0, oldInsertions: 0 };
+  const drafts = options.drafts || new Map();
+  const stats = { insertions: 0, created: 0, released: 0, acknowledgments: 0, releases: 0, preparations: 0, oldInsertions: 0 };
   const actions = {
     captureInsertion: () => ({ start: snapshot.draft.length, end: snapshot.draft.length, draftRev: snapshot.draftRev }),
     addAttachments(ids) { snapshot.attachmentIds.push(...ids); return true; },
     insertText(text, span) {
       if (options.blockRollback) { snapshot.phase = "submitting"; return false; }
       if (options.failInsert || span.draftRev !== snapshot.draftRev || snapshot.phase === "submitting") return false;
-      snapshot.draft += text; snapshot.draftRev++; stats.insertions++; return true;
+      snapshot.draft += text; snapshot.draftRev++; stats.insertions++;
+      if (options.collapseAfterInsert) snapshot.draft = snapshot.draft.split(/\r?\n/).filter(line => line.trim()).join("\n");
+      if (options.failInsertAfterMutation) throw new Error("fixture insert publication unavailable");
+      return true;
     },
+    persistDraft() { if (options.failPersist) throw new Error("fixture draft persistence unavailable"); },
   };
   const shell = {
     get snapshot() { return snapshot; },
@@ -193,17 +199,21 @@ async function clientFixture(options = {}) {
   const conversation = {
     input: { for: () => shell },
     createDrafts(_sessionId, files) {
-      const result = files.map(file => ({ id: `fixture-draft-${++stats.created}`, file }));
+      const result = files.map(file => ({ id: `fixture-draft-${++consumerNumber}-${++stats.created}`, file }));
       for (const draft of result) drafts.set(draft.id, draft);
       return result;
     },
     releaseDraftAttachments(values) { for (const value of values) { drafts.delete(value.id); stats.released++; } },
+    resolveDraftAttachments(ids) { return ids.map(id => drafts.get(id)).filter(Boolean); },
   };
   const intervals = new Set();
-  const effects = [];
+  const instances = new Set();
+  let rendering;
+  let hookIndex = 0;
   let Wrapper;
   let failedAcks = options.failedAcks || 0;
   let getGate = null;
+  let prepareGate = null;
   const ctx = {
     get: name => name === "sessions" ? { binding: () => binding } : name === "conversation" ? conversation : undefined,
     slots: { inject(_slot, fn) { fn(); }, register(_declaration, component) { Wrapper = component; } },
@@ -211,9 +221,28 @@ async function clientFixture(options = {}) {
   runInNewContext(readFileSync(path.join(root, "lib", "client.js"), "utf8"), {
     window: {
       __ModuleLoader__: { load(bundle) { bundle.factory(() => ({
-        createElement: (type, props) => ({ type, props }),
-        useRef: () => ({ current: { isConnected: true, nodeType: 1 } }),
-        useEffect: effect => effects.push(effect),
+        createElement: (type, props, ...children) => ({ type, props: { ...props, ...(children.length ? { children } : {}) } }),
+        useRef() {
+          const index = hookIndex++;
+          return rendering.hooks[index] ||= { current: { isConnected: true, nodeType: 1 } };
+        },
+        useState(initial) {
+          const index = hookIndex++;
+          const instance = rendering;
+          if (!(index in instance.hooks)) instance.hooks[index] = typeof initial === "function" ? initial() : initial;
+          return [instance.hooks[index], value => {
+            instance.hooks[index] = typeof value === "function" ? value(instance.hooks[index]) : value;
+            if (instance.alive) render(instance);
+          }];
+        },
+        useEffect(effect, dependencies) {
+          const index = hookIndex++;
+          const previous = rendering.hooks[index];
+          if (!previous || dependencies.some((value, position) => value !== previous.dependencies[position])) {
+            rendering.hooks[index] = { dependencies };
+            rendering.effects.push({ index, effect });
+          }
+        },
       })).apply(ctx); } },
       crypto: { randomUUID: () => `fixture-consumer-${++consumerNumber}` },
       getComputedStyle: () => ({ display: "block", visibility: "visible" }),
@@ -225,35 +254,86 @@ async function clientFixture(options = {}) {
     fetch: async (_url, init = {}) => {
       if (init.method === "POST") {
         const payload = JSON.parse(init.body);
-        if (payload.action === "ack") {
+        if (payload.action === "prepare" || payload.action === "retry") {
+          stats.preparations++;
+          if (options.failPrepareBeforeSave) throw new Error("fixture prepare unavailable before save");
+          const prepared = host.prepareMark(home, payload.id, payload.consumer, payload.claim, payload.delivery, payload.action === "retry");
+          if (options.delayPrepare) await new Promise(resolve => { prepareGate = resolve; });
+          if (options.failPrepareAfterSave) throw new Error("fixture prepare response lost after save");
+          return { ok: true, json: async () => ({ ok: true, mark: prepared }) };
+        } else if (payload.action === "ack") {
           stats.acknowledgments++;
           if (failedAcks-- > 0) throw new Error("fixture acknowledgment unavailable");
-          ackMark(home, payload.id, payload.consumer, payload.claim);
+          host.ackMark(home, payload.id, payload.consumer, payload.claim);
           if (options.loseAckResponse) { options.loseAckResponse = false; throw new Error("fixture acknowledgment response lost"); }
-        } else { stats.releases++; releaseMark(home, payload.id, payload.consumer, payload.claim); }
+        } else {
+          stats.releases++;
+          if (options.failRelease) throw new Error("fixture release unavailable");
+          host.releaseMark(home, payload.id, payload.consumer, payload.claim);
+        }
         return { ok: true, json: async () => ({ ok: true, acknowledged: true }) };
       }
       const consumer = init.headers?.["x-dsh-chrome-consumer"] || "legacy-consumer";
-      const result = peekMark(home, consumer);
+      const result = host.peekMark(home, consumer);
       if (options.expiredLease && result) result.leaseUntil = Date.now() - 1;
       if (options.delayGet) await new Promise(resolve => { getGate = resolve; });
       if (options.failGet) throw new Error("fixture read unavailable");
       return { ok: true, json: async () => ({ ok: true, mark: result }) };
     },
   });
+  function render(instance) {
+    rendering = instance;
+    hookIndex = 0;
+    const element = Wrapper({ sessionId: instance.sessionId });
+    instance.tree = element.type(element.props);
+    rendering = null;
+    for (const { index, effect } of instance.effects.splice(0)) {
+      instance.cleanups[index]?.();
+      instance.cleanups[index] = effect();
+    }
+  }
   function mount() {
-    const element = Wrapper({ sessionId: "fixture-session" });
-    element.type(element.props);
-    return effects.pop()();
+    const instance = { sessionId: options.sessionId || "fixture-session", alive: true, hooks: [], effects: [], cleanups: [], tree: null };
+    instances.add(instance);
+    render(instance);
+    return () => {
+      instance.alive = false;
+      for (const cleanup of instance.cleanups) cleanup?.();
+      instances.delete(instance);
+    };
   }
   const cleanup = mount();
   const flush = async () => { for (let index = 0; index < 10; index++) await new Promise(resolve => setImmediate(resolve)); };
   await flush();
-  return { home, mark, snapshot, notices, drafts, stats, options, mount, cleanup, flush,
+  function nodes() {
+    const result = [];
+    function visit(value) {
+      if (Array.isArray(value)) { value.forEach(visit); return; }
+      if (!value || typeof value !== "object") return;
+      result.push(value);
+      visit(value.props?.children);
+    }
+    for (const instance of instances) visit(instance.tree);
+    return result;
+  }
+  return { home, mark, snapshot, notices, drafts, stats, options, mount, cleanup, flush, nodes,
     resolveGet() { const resolve = getGate; getGate = null; resolve?.(); },
+    resolvePrepare() { const resolve = prepareGate; prepareGate = null; resolve?.(); },
+    async click(label) {
+      const button = nodes().find(node => node.type === "button" && JSON.stringify(node.props?.children).includes(label));
+      assert.ok(button, `missing recovery button: ${label}`);
+      assert.notEqual(button.props.disabled, true, `disabled recovery button: ${label}`);
+      await button.props.onClick(); await flush();
+    },
     async tick() { for (const fn of intervals) fn(); await flush(); },
     remaining: () => readdirSync(marksDir(home)).filter(name => name.endsWith(".json")).length,
-    close() { cleanup?.(); rmSync(home, { recursive: true, force: true }); },
+    destroyRenderer() { for (const instance of instances) { instance.alive = false; for (const cleanup of instance.cleanups) cleanup?.(); } instances.clear(); },
+    async freshVM(extra = {}) {
+      this.destroyRenderer();
+      const restartedHost = await import(`../lib/marks.js?restart=${++consumerNumber}`);
+      return clientFixture({ home, mark, snapshot, drafts, host: restartedHost, ...extra });
+    },
+    close() { this.destroyRenderer(); rmSync(home, { recursive: true, force: true }); },
   };
 }
 
@@ -341,7 +421,7 @@ test("shipped Client does not repeat insertion when a successful acknowledgment 
     await fixture.tick();
     assert.equal(fixture.stats.insertions, 1);
     assert.equal(fixture.stats.created, 1);
-    assert.equal(fixture.stats.acknowledgments, 2);
+    assert.equal(fixture.stats.acknowledgments, 1);
   } finally { fixture.close(); }
 });
 
@@ -398,4 +478,324 @@ test("two shipped Client windows cannot both insert one leased mark", async () =
     assert.equal(second.stats.insertions, 0);
     assert.equal(first.remaining(), 0);
   } finally { first.close(); second.close(); }
+});
+
+async function preparedClient(options = {}) {
+  const home = mkdtempSync(path.join(tmpdir(), "dsh-chrome-prepared-"));
+  const mark = saveMark(home, { url: "https://fixture.invalid/", image: "aGVsbG8=",
+    items: [{ selector: "#fixture", note: "original requested change" }] });
+  const claimed = peekMark(home, "fixture-seed-consumer");
+  defaultHost.prepareMark(home, mark.id, "fixture-seed-consumer", claimed.claim, {
+    sessionId: "fixture-session",
+    attachmentIds: ["fixture-retained-image"],
+  });
+  if (options.retryBeforeInsert) {
+    defaultHost.prepareMark(home, mark.id, "fixture-seed-consumer", claimed.claim, {
+      sessionId: "fixture-session",
+      attachmentIds: ["fixture-uninserted-retry-image"],
+    }, true);
+  }
+  const retainedPrompt = options.collapsedPrompt
+    ? mark.prompt.split(/\r?\n/).filter(line => line.trim()).join("\n") : mark.prompt;
+  const snapshot = { phase: "plain", draft: options.text ? `${retainedPrompt}\n` : "", draftRev: 0,
+    attachmentIds: options.image ? ["fixture-retained-image"] : [] };
+  const drafts = new Map(options.image ? [["fixture-retained-image", { id: "fixture-retained-image" }]] : []);
+  const host = await import(`../lib/marks.js?restart=${++consumerNumber}`);
+  return clientFixture({ home, mark, snapshot, drafts, host, ...options });
+}
+
+function recoveryButtons(fixture) {
+  return fixture.nodes().filter(node => node.type === "button").map(node => JSON.stringify(node.props.children));
+}
+
+test("a fresh renderer acknowledges retained text and image without inserting either twice", async () => {
+  const first = await clientFixture({ failedAcks: 1 });
+  let restarted;
+  try {
+    assert.equal(first.stats.insertions, 1);
+    assert.equal(first.remaining(), 1);
+    restarted = await first.freshVM();
+    assert.equal(restarted.stats.insertions, 0);
+    assert.equal(restarted.stats.created, 0);
+    assert.equal(restarted.stats.acknowledgments, 1);
+    assert.equal(restarted.snapshot.attachmentIds.length, 1);
+    assert.equal(restarted.remaining(), 0);
+  } finally { if (restarted) restarted.close(); else first.close(); }
+});
+
+test("a fresh renderer with no retained draft asks before restoring a prepared delivery", async () => {
+  const first = await clientFixture({ failedAcks: 1 });
+  let restarted;
+  try {
+    restarted = await first.freshVM({ snapshot: { phase: "plain", draft: "", draftRev: 0, attachmentIds: [] }, drafts: new Map() });
+    assert.equal(restarted.stats.insertions, 0);
+    assert.equal(restarted.stats.created, 0);
+    assert.equal(restarted.stats.acknowledgments, 0);
+    assert.equal(restarted.remaining(), 1);
+    assert.equal(recoveryButtons(restarted).length, 2);
+    await restarted.click("重新放入草稿");
+    assert.equal(restarted.stats.insertions, 1);
+    assert.equal(restarted.snapshot.attachmentIds.length, 1);
+    assert.equal(restarted.remaining(), 0);
+  } finally { if (restarted) restarted.close(); else first.close(); }
+});
+
+test("a durable prepare before any actual insertion retains the queue and requires a choice", async () => {
+  const fixture = await preparedClient();
+  try {
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.stats.created, 0);
+    assert.equal(fixture.stats.acknowledgments, 0);
+    assert.equal(fixture.remaining(), 1);
+    assert.equal(recoveryButtons(fixture).length, 2);
+    await fixture.tick();
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.remaining(), 1);
+    await fixture.click("已接收，完成确认");
+    assert.equal(fixture.remaining(), 0);
+    assert.equal(fixture.stats.insertions, 0);
+  } finally { fixture.close(); }
+});
+
+test("text-only or image-only retained delivery is never silently acknowledged or reinserted", async () => {
+  for (const mode of [{ text: true }, { image: true }]) {
+    const fixture = await preparedClient(mode);
+    try {
+      assert.equal(fixture.stats.insertions, 0);
+      assert.equal(fixture.stats.created, 0);
+      assert.equal(fixture.stats.acknowledgments, 0);
+      assert.equal(fixture.remaining(), 1);
+      assert.equal(recoveryButtons(fixture).length, 2);
+    } finally { fixture.close(); }
+  }
+});
+
+test("restoring a text-only delivery keeps its prompt once and preserves unrelated attachments", async () => {
+  const fixture = await preparedClient({ text: true });
+  try {
+    fixture.snapshot.attachmentIds.push("user-unrelated-image");
+    await fixture.click("重新放入草稿");
+    assert.equal(fixture.snapshot.draft.split(fixture.mark.prompt).length - 1, 1);
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.stats.created, 1);
+    assert.equal(fixture.snapshot.attachmentIds.length, 2);
+    assert.ok(fixture.snapshot.attachmentIds.includes("user-unrelated-image"));
+    assert.equal(fixture.remaining(), 0);
+  } finally { fixture.close(); }
+});
+
+test("restoring an image-only delivery replaces only the recorded attachment and adds the prompt", async () => {
+  const fixture = await preparedClient({ image: true });
+  try {
+    fixture.snapshot.attachmentIds.push("user-unrelated-image");
+    await fixture.click("重新放入草稿");
+    assert.equal(fixture.stats.insertions, 1);
+    assert.equal(fixture.stats.created, 1);
+    assert.equal(fixture.snapshot.attachmentIds.length, 2);
+    assert.ok(fixture.snapshot.attachmentIds.includes("user-unrelated-image"));
+    assert.equal(fixture.snapshot.attachmentIds.includes("fixture-retained-image"), false);
+    assert.equal(fixture.remaining(), 0);
+  } finally { fixture.close(); }
+});
+
+test("prepared delivery in another session cannot be inserted or acknowledged there", async () => {
+  const fixture = await preparedClient({ sessionId: "fixture-other-session", text: true, image: true });
+  try {
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.stats.created, 0);
+    assert.equal(fixture.stats.acknowledgments, 0);
+    assert.equal(fixture.remaining(), 1);
+    assert.equal(recoveryButtons(fixture).length, 0);
+    assert.match(JSON.stringify(fixture.nodes()), /原会话|原.*会话/);
+    await fixture.tick();
+    assert.equal(fixture.remaining(), 1);
+  } finally { fixture.close(); }
+});
+
+test("prepare failure before saving cannot insert text or image and can retry", async () => {
+  const fixture = await clientFixture({ failPrepareBeforeSave: true });
+  try {
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.snapshot.attachmentIds.length, 0);
+    assert.equal(fixture.drafts.size, 0);
+    assert.equal(fixture.remaining(), 1);
+    assert.ok(fixture.notices.some(message => /prepare unavailable/.test(message)));
+    fixture.options.failPrepareBeforeSave = false;
+    await fixture.tick();
+    assert.equal(fixture.stats.insertions, 1);
+    assert.equal(fixture.remaining(), 0);
+  } finally { fixture.close(); }
+});
+
+test("lost prepare response after durable save inserts nothing until a safe rollback and retry", async () => {
+  const fixture = await clientFixture({ failPrepareAfterSave: true });
+  try {
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.snapshot.attachmentIds.length, 0);
+    assert.equal(fixture.remaining(), 1);
+    fixture.options.failPrepareAfterSave = false;
+    await fixture.tick();
+    assert.equal(fixture.stats.insertions, 1);
+    assert.equal(fixture.stats.acknowledgments, 1);
+    assert.equal(fixture.remaining(), 0);
+  } finally { fixture.close(); }
+});
+
+test("lost prepare response and failed release retain durable delivery for explicit recovery", async () => {
+  const fixture = await clientFixture({ failPrepareAfterSave: true, failRelease: true });
+  try {
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.snapshot.attachmentIds.length, 0);
+    assert.equal(fixture.drafts.size, 0);
+    assert.equal(fixture.remaining(), 1);
+    assert.ok(fixture.notices.some(message => /prepare response lost.*release unavailable/.test(message)));
+    fixture.options.failPrepareAfterSave = false;
+    fixture.options.failRelease = false;
+    await fixture.tick();
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.stats.acknowledgments, 0);
+    assert.equal(recoveryButtons(fixture).length, 2);
+    await fixture.click("重新放入草稿");
+    assert.equal(fixture.stats.insertions, 1);
+    assert.equal(fixture.remaining(), 0);
+  } finally { fixture.close(); }
+});
+
+test("changing the draft during awaited prepare rolls back drafts without consuming the mark", async () => {
+  const fixture = await clientFixture({ delayPrepare: true });
+  try {
+    assert.equal(fixture.stats.preparations, 1);
+    assert.equal(fixture.stats.insertions, 0);
+    fixture.snapshot.draft = "user edited while preparing";
+    fixture.snapshot.draftRev++;
+    fixture.resolvePrepare(); await fixture.flush();
+    assert.equal(fixture.snapshot.draft, "user edited while preparing");
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.snapshot.attachmentIds.length, 0);
+    assert.equal(fixture.drafts.size, 0);
+    assert.equal(fixture.stats.acknowledgments, 0);
+    assert.equal(fixture.remaining(), 1);
+  } finally { fixture.close(); }
+});
+
+test("draft persistence failure after insertion retains delivery and never inserts the prompt twice", async () => {
+  const fixture = await clientFixture({ failPersist: true });
+  try {
+    assert.equal(fixture.stats.insertions, 1);
+    assert.equal(fixture.snapshot.attachmentIds.length, 1);
+    assert.equal(fixture.remaining(), 1);
+    assert.equal(fixture.stats.releases, 0);
+    assert.ok(fixture.notices.some(message => /draft persistence unavailable/.test(message)));
+    fixture.options.failPersist = false;
+    await fixture.tick();
+    assert.equal(fixture.stats.insertions, 1);
+    assert.equal(fixture.stats.created, 1);
+    assert.equal(fixture.snapshot.draft.split(fixture.mark.prompt).length - 1, 1);
+    assert.equal(fixture.remaining(), 0);
+  } finally { fixture.close(); }
+});
+
+test("restarting after retry prepare cleans replaced mark images while preserving user images", async () => {
+  const fixture = await preparedClient({ image: true, text: true, retryBeforeInsert: true });
+  try {
+    fixture.snapshot.attachmentIds.push("user-unrelated-image");
+    fixture.drafts.set("user-unrelated-image", { id: "user-unrelated-image" });
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.stats.acknowledgments, 0);
+    assert.equal(fixture.remaining(), 1);
+    assert.equal(recoveryButtons(fixture).length, 2);
+    await fixture.click("重新放入草稿");
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.snapshot.draft.split(fixture.mark.prompt).length - 1, 1);
+    assert.equal(fixture.snapshot.attachmentIds.length, 2);
+    assert.ok(fixture.snapshot.attachmentIds.includes("user-unrelated-image"));
+    assert.equal(fixture.snapshot.attachmentIds.includes("fixture-retained-image"), false);
+    assert.equal(fixture.drafts.has("fixture-retained-image"), false);
+    assert.equal(fixture.drafts.has("user-unrelated-image"), true);
+    assert.equal(fixture.remaining(), 0);
+  } finally { fixture.close(); }
+});
+
+test("insertText throwing after mutation retains inserted delivery without duplicating its text or image", async () => {
+  const fixture = await clientFixture({ failInsertAfterMutation: true });
+  try {
+    assert.equal(fixture.stats.insertions, 1);
+    assert.equal(fixture.snapshot.draft.split(fixture.mark.prompt).length - 1, 1);
+    assert.equal(fixture.snapshot.attachmentIds.length, 1);
+    assert.equal(fixture.remaining(), 1);
+    assert.equal(fixture.stats.releases, 0);
+    assert.equal(fixture.stats.acknowledgments, 0);
+    assert.ok(fixture.notices.some(message => /insert publication unavailable/.test(message)));
+    fixture.options.failInsertAfterMutation = false;
+    await fixture.tick();
+    assert.equal(fixture.stats.insertions, 1);
+    assert.equal(fixture.stats.created, 1);
+    assert.equal(fixture.snapshot.draft.split(fixture.mark.prompt).length - 1, 1);
+    assert.equal(fixture.snapshot.attachmentIds.length, 1);
+    assert.equal(fixture.stats.acknowledgments, 1);
+    assert.equal(fixture.remaining(), 0);
+  } finally { fixture.close(); }
+});
+
+test("a restarted renderer recognizes a full prompt when Lexical removed only blank lines", async () => {
+  const fixture = await preparedClient({ text: true, image: true, collapsedPrompt: true });
+  try {
+    assert.equal(fixture.snapshot.draft.includes(fixture.mark.prompt), false);
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.stats.created, 0);
+    assert.equal(fixture.stats.acknowledgments, 1);
+    assert.equal(fixture.remaining(), 0);
+  } finally { fixture.close(); }
+});
+
+test("restoring a collapsed text-only prompt preserves user text and does not duplicate Design Feedback", async () => {
+  const fixture = await preparedClient({ text: true, collapsedPrompt: true });
+  try {
+    const userPrefix = "User reference: /work/design.ts:7  \r\n";
+    const userSuffix = "\r\n独立说明和引用：[源文件](/work/source.ts)  ";
+    fixture.snapshot.draft = userPrefix + fixture.snapshot.draft.replaceAll("\n", "\r\n") + userSuffix;
+    fixture.snapshot.draftRev++;
+    const beforeRestore = fixture.snapshot.draft;
+    assert.equal(fixture.stats.acknowledgments, 0);
+    assert.equal(recoveryButtons(fixture).length, 2);
+    await fixture.click("重新放入草稿");
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.snapshot.draft, beforeRestore);
+    assert.equal(fixture.snapshot.draft.split("## Design Feedback").length - 1, 1);
+    assert.equal(fixture.stats.created, 1);
+    assert.equal(fixture.snapshot.attachmentIds.length, 1);
+    assert.equal(fixture.remaining(), 0);
+  } finally { fixture.close(); }
+});
+
+test("changing a nonblank Request line is not mistaken for the complete original prompt", async () => {
+  const fixture = await preparedClient({ text: true, collapsedPrompt: true });
+  try {
+    // A user edit to a nonblank line must remain distinct even when all images are present.
+    fixture.snapshot.draft = fixture.snapshot.draft.replace("original requested change", "user edited request");
+    fixture.snapshot.attachmentIds.push("fixture-retained-image");
+    await fixture.tick();
+    assert.equal(fixture.stats.acknowledgments, 0);
+    assert.equal(fixture.remaining(), 1);
+    assert.equal(recoveryButtons(fixture).length, 2);
+    await fixture.click("重新放入草稿");
+    assert.equal(fixture.stats.insertions, 1);
+    assert.match(fixture.snapshot.draft, /user edited request/);
+    assert.match(fixture.snapshot.draft, /original requested change/);
+  } finally { fixture.close(); }
+});
+
+test("insertText publication failure after blank-line normalization retains the delivered prompt", async () => {
+  const fixture = await clientFixture({ failInsertAfterMutation: true, collapseAfterInsert: true });
+  try {
+    assert.equal(fixture.stats.insertions, 1);
+    assert.equal(fixture.snapshot.attachmentIds.length, 1);
+    assert.equal(fixture.remaining(), 1);
+    assert.equal(fixture.stats.releases, 0);
+    fixture.options.failInsertAfterMutation = false;
+    await fixture.tick();
+    assert.equal(fixture.stats.insertions, 1);
+    assert.equal(fixture.snapshot.draft.split("## Design Feedback").length - 1, 1);
+    assert.equal(fixture.remaining(), 0);
+  } finally { fixture.close(); }
 });
