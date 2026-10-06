@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  guardLlm,
-  hasRawImage,
   projectScreenshot,
   renderScreenshot,
-  sanitizeModelMessages,
+  routeAcceptsImages,
 } from "../lib/image.js";
 import { chromeTools } from "../lib/tools.js";
 
@@ -64,71 +62,6 @@ test("projectScreenshot stays text-only when storage is missing or rejects", asy
   assert.match(rejected.text, /too large/);
 });
 
-test("sanitize rewrites poisoned tool results and leaves valid images", async () => {
-  const raw = Buffer.from("png-bytes").toString("base64");
-  const messages = [{
-    role: "user",
-    content: [{
-      type: "tool-result",
-      content: [
-        { type: "text", text: "saved /tmp/a.png" },
-        { type: "image", data: raw, mimeType: "image/png" },
-        { type: "image", attachment: REF },
-      ],
-    }],
-  }];
-  assert.equal(hasRawImage(messages), true);
-  const healed = await sanitizeModelMessages(messages, async () => REF);
-  const nested = healed[0].content[0].content;
-  assert.equal(nested[1].attachment.attachmentId, REF.attachmentId);
-  assert.equal(nested[1].data, undefined);
-  assert.equal(nested[2].attachment, REF);
-  assert.equal(hasRawImage(healed), false);
-
-  const dropped = await sanitizeModelMessages(messages);
-  assert.equal(dropped[0].content[0].content[1].type, "text");
-  assert.match(dropped[0].content[0].content[1].text, /attachment reference/);
-});
-
-test("llm guard rewrites only poisoned requests", async () => {
-  const seen = [];
-  const llm = {
-    prepareCall() {
-      return {
-        config: { provider: "xai", model: "grok" },
-        stream(request) {
-          seen.push(request);
-          return ["ok"];
-        },
-      };
-    },
-    stream(request) {
-      seen.push(request);
-      return ["direct"];
-    },
-  };
-  assert.equal(guardLlm(llm, {
-    attachments: () => ({ saveImage: async () => REF }),
-  }), true);
-  assert.equal(guardLlm(llm), false);
-
-  const healthy = { provider: "xai", model: "grok", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] };
-  const prepared = await llm.prepareCall();
-  assert.deepEqual(prepared.stream(healthy), ["ok"]);
-  assert.equal(seen[0], healthy);
-
-  const raw = Buffer.from("png-bytes").toString("base64");
-  const poisoned = {
-    provider: "xai",
-    model: "grok",
-    messages: [{ role: "user", content: [{ type: "image", data: raw, mimeType: "image/png" }] }],
-  };
-  const chunks = [];
-  for await (const chunk of prepared.stream(poisoned)) chunks.push(chunk);
-  assert.deepEqual(chunks, ["ok"]);
-  assert.equal(seen[1].messages[0].content[0].attachment.attachmentId, REF.attachmentId);
-  assert.equal(seen[1].provider, "xai");
-});
 
 test("chrome screenshot tool no longer declares a raw image string", () => {
   const shot = chromeTools().find((definition) => definition.name === "chrome_screenshot");
@@ -136,4 +69,27 @@ test("chrome screenshot tool no longer declares a raw image string", () => {
   assert.equal(shot.output.schema.properties.image.properties.attachmentId.type, "string");
   const rendered = shot.output.render({}, { text: "saved", image: "aaaa" });
   assert.deepEqual(rendered, [{ type: "text", text: "saved" }]);
+});
+
+test("image admission requires positive current model support", async () => {
+  const exec = { agent: { session: { requestHeader: () => ({ config: { provider: "xai", model: "grok" } }) } } };
+  assert.equal(await routeAcceptsImages(null, exec), false);
+  assert.equal(await routeAcceptsImages({ resolveModelInfo: async () => ({}) }, exec), false);
+  assert.equal(await routeAcceptsImages({ resolveModelInfo: async () => ({ inputModalities: ["text"] }) }, exec), false);
+  assert.equal(await routeAcceptsImages({ resolveModelInfo: async () => ({ inputModalities: ["text", "image"] }) }, exec), true);
+  await assert.rejects(routeAcceptsImages({ resolveModelInfo: async () => { throw new Error("route failed"); } }, exec), /route failed/);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(routeAcceptsImages(null, { ...exec, signal: controller.signal }), { name: "AbortError" });
+});
+
+test("unconfirmed image input remains text only and does not save an attachment", async () => {
+  let saves = 0;
+  const shot = await projectScreenshot({ text: "saved /tmp/a.png", image: "cG5n" }, {
+    saveImage: async () => { saves += 1; return REF; },
+    acceptsImages: async () => false,
+  });
+  assert.equal(saves, 0);
+  assert.equal(shot.image, undefined);
+  assert.match(shot.text, /could not be confirmed/);
 });

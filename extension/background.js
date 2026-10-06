@@ -1,7 +1,11 @@
-import { GROUP_TITLE, HOST_NAME, canPick, groupTitle, ignoreFocusMethod, tabCreateProperties, windowCreateProperties } from "./policy.js";
+import { GROUP_TITLE, HOST_NAME, OWNERSHIP_KEY, canPick, groupTitle, ignoreFocusMethod, requireOwner, tabCreateProperties, windowCreateProperties } from "./policy.js";
 import { jpegBoxes, jpegCrop } from "./shot.js";
 
 const sessions = new Map();
+const tabOwners = new Map();
+const pendingMarks = new Map();
+let ownersReady = null;
+let ownersSaved = Promise.resolve();
 let port = null;
 let reconnectTimer = null;
 
@@ -29,16 +33,41 @@ function postEvent(message) {
 }
 
 function ownerOf(params) {
-  const owner = params && params.dshOwner;
-  return typeof owner === "string" && owner.trim() ? owner.trim() : "default";
+  return requireOwner(params?.dshOwner);
+}
+
+function loadOwners() {
+  if (!ownersReady) ownersReady = chrome.storage.session.get(OWNERSHIP_KEY).then((stored) => {
+    for (const entry of stored[OWNERSHIP_KEY] || []) {
+      if (Array.isArray(entry) && Number.isInteger(entry[0]) && typeof entry[1] === "string" && entry[1].trim()) {
+        tabOwners.set(entry[0], entry[1]);
+      }
+    }
+  });
+  return ownersReady;
+}
+
+function saveOwners() {
+  const saved = ownersSaved.catch(() => {}).then(() => chrome.storage.session.set({ [OWNERSHIP_KEY]: [...tabOwners] }));
+  ownersSaved = saved;
+  return saved;
+}
+
+async function ownedTab(tabId, owner) {
+  await loadOwners();
+  if (tabOwners.get(tabId) !== owner) throw new Error(`tab ${tabId} does not belong to this DSH conversation`);
+  return chrome.tabs.get(tabId);
 }
 
 async function groupTab(tabId, windowId, owner) {
+  await loadOwners();
   const title = groupTitle(owner);
-  const existing = await chrome.tabGroups.query({ title, windowId });
-  if (existing[0]) {
-    await chrome.tabs.group({ groupId: existing[0].id, tabIds: tabId });
-    return existing[0].id;
+  const tabs = await chrome.tabs.query({ windowId });
+  const existing = tabs.find((tab) => tab.groupId >= 0 && tabOwners.get(tab.id) === owner
+    && tabs.filter((item) => item.groupId === tab.groupId).every((item) => tabOwners.get(item.id) === owner));
+  if (existing) {
+    await chrome.tabs.group({ groupId: existing.groupId, tabIds: tabId });
+    return existing.groupId;
   }
   const groupId = await chrome.tabs.group({
     tabIds: tabId,
@@ -48,7 +77,8 @@ async function groupTab(tabId, windowId, owner) {
   return groupId;
 }
 
-async function attachTab(tabId) {
+async function attachTab(tabId, owner) {
+  await ownedTab(tabId, owner);
   const sessionId = sessionIdFor(tabId);
   try {
     await chrome.debugger.attach({ tabId }, "1.3");
@@ -61,27 +91,36 @@ async function attachTab(tabId) {
 }
 
 async function createTarget(url, owner) {
+  await loadOwners();
   const wins = await chrome.windows.getAll({ windowTypes: ["normal"] });
   const focused = wins.find((win) => win.focused) || wins[0];
+  let tab;
   if (!focused) {
     const created = await chrome.windows.create(windowCreateProperties(url || "about:blank"));
-    const tab = created?.tabs?.find((item) => item.id != null);
+    tab = created?.tabs?.find((item) => item.id != null);
     if (created?.id == null || tab?.id == null) throw new Error("Chrome has no normal window");
-    await groupTab(tab.id, created.id, owner);
-    return { targetId: sessionIdFor(tab.id) };
+    tab.windowId = created.id;
+  } else {
+    tab = await chrome.tabs.create(tabCreateProperties(focused.id, url));
+    if (tab.id == null) throw new Error("Chrome did not return a tab id");
+    tab.windowId ??= focused.id;
   }
-  const tab = await chrome.tabs.create(tabCreateProperties(focused.id, url));
-  if (tab.id == null) throw new Error("Chrome did not return a tab id");
-  await groupTab(tab.id, tab.windowId ?? focused.id, owner);
+  try {
+    await groupTab(tab.id, tab.windowId, owner);
+    tabOwners.set(tab.id, owner);
+    await saveOwners();
+  } catch (error) {
+    tabOwners.delete(tab.id);
+    await chrome.tabs.remove(tab.id);
+    throw error;
+  }
   return { targetId: sessionIdFor(tab.id) };
 }
 
 async function listAgentTabs(owner) {
-  const groups = await chrome.tabGroups.query({ title: groupTitle(owner) });
-  const groupIds = new Set(groups.map((group) => group.id));
-  if (groupIds.size === 0) return [];
+  await loadOwners();
   const tabs = await chrome.tabs.query({});
-  return tabs.filter((tab) => tab.id != null && groupIds.has(tab.groupId));
+  return tabs.filter((tab) => tab.id != null && tabOwners.get(tab.id) === owner);
 }
 
 async function closeAgentTabs(owner) {
@@ -96,6 +135,8 @@ async function closeAgentTabs(owner) {
     sessions.delete(sessionIdFor(tabId));
   }));
   if (ids.length) await chrome.tabs.remove(ids);
+  for (const id of ids) tabOwners.delete(id);
+  await saveOwners();
   return {};
 }
 
@@ -118,14 +159,17 @@ async function agentDownloadItems(owner) {
 async function handle(message) {
   const method = String(message.method || "");
   const params = message.params || {};
+  if (method === "DSH.hello") return { ok: true, group: GROUP_TITLE, protocolVersion: 2 };
   const owner = ownerOf(params);
-  if (method === "DSH.hello") return { ok: true, group: GROUP_TITLE };
-  if (ignoreFocusMethod(method)) return {};
   if (message.sessionId) {
     const tabId = sessions.get(message.sessionId);
     if (tabId == null) throw new Error(`tab session is gone: ${message.sessionId}`);
-    return await chrome.debugger.sendCommand({ tabId }, method, params) || {};
+    await ownedTab(tabId, owner);
+    if (ignoreFocusMethod(method)) return {};
+    const { dshOwner, ...commandParams } = params;
+    return await chrome.debugger.sendCommand({ tabId }, method, commandParams) || {};
   }
+  if (ignoreFocusMethod(method)) return {};
   if (method === "Target.setDiscoverTargets") return {};
   if (method === "Browser.setDownloadBehavior") return {};
   if (method === "Browser.getDownloadItems") return { items: await agentDownloadItems(owner) };
@@ -142,9 +186,10 @@ async function handle(message) {
     };
   }
   if (method === "Target.createTarget") return createTarget(params.url, owner);
-  if (method === "Target.attachToTarget") return attachTab(tabIdFrom(params.targetId));
+  if (method === "Target.attachToTarget") return attachTab(tabIdFrom(params.targetId), owner);
   if (method === "Target.closeTarget") {
     const tabId = tabIdFrom(params.targetId);
+    await ownedTab(tabId, owner);
     try {
       await chrome.debugger.detach({ tabId });
     } catch {
@@ -152,10 +197,12 @@ async function handle(message) {
     }
     sessions.delete(sessionIdFor(tabId));
     await chrome.tabs.remove(tabId);
+    tabOwners.delete(tabId);
+    await saveOwners();
     return { success: true };
   }
   if (method === "Browser.getWindowForTarget") {
-    const tab = await chrome.tabs.get(tabIdFrom(params.targetId));
+    const tab = await ownedTab(tabIdFrom(params.targetId), owner);
     const win = await chrome.windows.get(tab.windowId);
     return {
       windowId: win.id,
@@ -175,6 +222,16 @@ async function handle(message) {
 
 async function onMessage(message) {
   if (!message || message.id == null) return;
+  const pending = pendingMarks.get(message.id);
+  if (pending) {
+    pendingMarks.delete(message.id);
+    clearTimeout(pending.timer);
+    if (message.error) pending.reject(new Error(message.error.message || "标注保存失败"));
+    else if (message.result?.ok === true) pending.resolve(message.result);
+    else pending.reject(new Error("DSH Chrome 主机未确认标注保存"));
+    return;
+  }
+  if (!message.method) return;
   try {
     const result = await handle(message);
     post({ id: message.id, result });
@@ -194,6 +251,11 @@ function connect() {
   port.onMessage.addListener(onMessage);
   port.onDisconnect.addListener(() => {
     port = null;
+    for (const pending of pendingMarks.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("DSH Chrome 主机断开，未确认标注保存，请重试"));
+    }
+    pendingMarks.clear();
     const message = chrome.runtime.lastError?.message || "";
     scheduleReconnect(/not found|forbidden|forbidden/i.test(message) ? 5000 : 1000);
   });
@@ -236,7 +298,13 @@ chrome.downloads.onChanged.addListener((delta) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  sessions.delete(sessionIdFor(tabId));
+  const targetId = sessionIdFor(tabId);
+  const hadSession = sessions.delete(targetId);
+  loadOwners().then(async () => {
+    const hadOwner = tabOwners.delete(tabId);
+    if (hadOwner || hadSession) postEvent({ method: "Target.targetDestroyed", params: { targetId } });
+    if (hadOwner) await saveOwners();
+  }).catch((error) => console.error("DSH tab ownership cleanup failed", error));
 });
 
 function flash(text) {
@@ -250,9 +318,23 @@ function flash(text) {
 function postMark(params) {
   if (!port) connect();
   if (!port) throw new Error("DSH Chrome 主机没连上");
-  const message = { method: "DSH.mark", params };
+  const id = `mark:${crypto.randomUUID()}`;
+  const message = { id, method: "DSH.mark", params };
   if (JSON.stringify(message).length > 900_000) throw new Error("标注图太大");
-  port.postMessage(message);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingMarks.delete(id);
+      reject(new Error("DSH Chrome 主机保存确认超时，请重试"));
+    }, 8000);
+    pendingMarks.set(id, { resolve, reject, timer });
+    try {
+      port.postMessage(message);
+    } catch (error) {
+      pendingMarks.delete(id);
+      clearTimeout(timer);
+      reject(error);
+    }
+  });
 }
 
 chrome.action.onClicked.addListener(async (tab) => {
@@ -314,7 +396,7 @@ async function captureAndSend(tab, message) {
     ? await jpegBoxes(dataUrl, items.map((item) => item.box), message.viewport)
     : await jpegCrop(dataUrl, message.box, message.viewport);
   const first = items[0] || {};
-  postMark({
+  await postMark({
     url: message.url,
     title: message.title,
     selector: message.selector || first.selector,

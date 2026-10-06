@@ -62,12 +62,19 @@ test("host stores a page mark without forwarding it to the tool socket", async (
     const fromHost = collect(child.stdout);
     const fromSocket = collect(socket);
     child.stdin.write(encodeFrame({
+      id: "mark:test",
       method: "DSH.mark",
       params: { url: "https://example.com", selector: "#box", image: "aGVsbG8=" },
     }));
+    const ack = await fromHost.next();
+    assert.equal(ack.id, "mark:test");
+    assert.equal(ack.result.ok, true);
+    assert.equal(typeof ack.result.markId, "string");
     socket.write(encodeFrame({ id: 3, method: "DSH.hello" }));
-    assert.deepEqual(await fromHost.next(), { id: 3, method: "DSH.hello" });
-    child.stdin.write(encodeFrame({ id: 3, result: { ok: true } }));
+    const outbound = await fromHost.next();
+    assert.equal(outbound.method, "DSH.hello");
+    assert.match(outbound.id, /^[a-f0-9]{32}:\d+$/);
+    child.stdin.write(encodeFrame({ id: outbound.id, result: { ok: true } }));
     assert.deepEqual(await fromSocket.next(), { id: 3, result: { ok: true } });
     const dir = path.join(home, "cache", "dsh-chrome-marks");
     let names = [];
@@ -114,9 +121,10 @@ test("host relays socket commands to the extension and replies back", async () =
     const fromHost = collect(child.stdout);
     socket.write(encodeFrame({ id: 7, method: "DSH.hello" }));
     const outbound = await fromHost.next();
-    assert.deepEqual(outbound, { id: 7, method: "DSH.hello" });
+    assert.equal(outbound.method, "DSH.hello");
+    assert.match(outbound.id, /^[a-f0-9]{32}:\d+$/);
     const fromSocket = collect(socket);
-    child.stdin.write(encodeFrame({ id: 7, result: { ok: true, group: "DSH" } }));
+    child.stdin.write(encodeFrame({ id: outbound.id, result: { ok: true, group: "DSH" } }));
     assert.deepEqual(await fromSocket.next(), { id: 7, result: { ok: true, group: "DSH" } });
   } finally {
     socket.destroy();

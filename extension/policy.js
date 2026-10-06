@@ -1,5 +1,11 @@
 export const HOST_NAME = "com.yueyexiayu.dsh.chrome";
 export const GROUP_TITLE = "DSH";
+export const OWNERSHIP_KEY = "dsh.chrome.tabOwners";
+
+export function requireOwner(value) {
+  if (typeof value !== "string" || !value.trim()) throw new Error("DSH conversation owner is required");
+  return value.trim();
+}
 
 export function groupTitle(owner) {
   const clean = String(owner || "default").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
