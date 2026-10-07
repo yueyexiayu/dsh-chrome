@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { JPEG } from "./fixtures/jpeg.mjs";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -13,7 +14,7 @@ let restart = 0;
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(tmpdir(), "dsh-chrome-recovery-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const mark = marks.saveMark(home, { url: "https://fixture.invalid/", image: "aGVsbG8=" });
+  const mark = marks.saveMark(home, { url: "https://fixture.invalid/", image: JPEG });
   const file = path.join(marks.marksDir(home), fs.readdirSync(marks.marksDir(home))[0]);
   return { home, mark, file, lease: marks.peekMark(home, consumer) };
 }

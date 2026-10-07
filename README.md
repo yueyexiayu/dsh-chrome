@@ -16,7 +16,7 @@ DeepSeek Harness 桌面插件。通过本机 Chrome 扩展，在**当前 Chrome*
       name: ../../plugins/chrome/lib/index.js
 ```
 
-完全退出 DeepSeek Harness（macOS：⌘Q）再打开。插件启动时会写入 Chrome 本机通信主机清单。
+先在插件目录运行 `pnpm install --frozen-lockfile`，安装锁定的纯 JavaScript JPEG 解码依赖（`jpeg-js`，不执行原生编译）。随后完全退出 DeepSeek Harness（macOS：⌘Q）再打开。插件启动时会写入 Chrome 本机通信主机清单。
 
 还要在正在使用的 Chrome 配置里装一次扩展：
 
@@ -37,18 +37,20 @@ DeepSeek Harness 桌面插件。通过本机 Chrome 扩展，在**当前 Chrome*
 - `chrome_screenshot` 把 PNG 落盘，并在确认当前模型支持图片时通过正式附件引用交回模型；配合 `zhanshi` 可在本轮对话里预览。插件不包装或改写全局 LLM 服务
 - 元素引用（ref）来自最近一次 `chrome_snapshot` / `chrome_query` / `chrome_find` / `chrome_a11y`；这几次调用都会重新编号
 - 不自动接受 `alert` / `confirm` / `prompt`。弹窗挡住后续点击或输入时，先调用 `chrome_dialog`
-- 点击、输入和查询只作用在顶层页面；跨源 iframe 里的内容不可见
+- 查询会合并可访问的 frame 执行上下文，ref 记录所属上下文；支持开放 shadow root、同源 iframe，以及 Chrome 调试器提供的跨源 frame 上下文。是否能访问取决于 Chrome 实际暴露的上下文，不保证所有嵌套/OOPIF 页面都可读。带 ref 的读取、执行、填写和上传按归属路由，不把 frame ref 当成顶层元素
+- 密码输入框的值不会进入默认快照、元素详情、HTML 或无障碍树输出；主动执行的 JavaScript 不属于脱敏观察接口，不应用来读取密码或凭据
+- 截图和 GIF 输出遵循调用会话的 DSH 文件策略；相对路径按会话目录解析，只创建新文件，绝不覆盖已有文件。只读模式禁止落盘，workspace-write 允许工作区及官方临时目录。文件服务不可用时明确拒绝，不退回不受限写入。上传要求本机正规文件
 - 下载进当前 Chrome 的下载目录。cookie / storage 默认不返回值；名字像 token 或密码的项始终打码
 
 ## 标注
 
-点 Chrome 工具栏里的 DSH Chrome（悬停是「发给 DSH」）。只在当前 http 或 https 页面上选。点击元素后写下要改的内容，选「改变」或「疑问」，再点添加。可以连续添加，最多 12 条。列表里点发送，一次放进当前 DSH 输入框。复制只复制文字，清空删掉全部注释。Esc 先关输入卡，再退出。再点一次图标也退出。
+点 Chrome 工具栏里的 DSH Chrome，在当前 http / https 页面上选择元素，最多 12 条。页面浮层只收集元素数据，不接收用户要求，也不能直接送入 DSH。点击「编辑要求」后，扩展检查原标签和 URL、截图，再打开独立的扩展确认页；这一步会切到确认页，后台浏览工具仍不会抢焦点。Esc 或再次点击工具栏图标退出选择。
 
-截下当前可视区域，红框和编号对应所选元素。文字按设计标注格式一次放进输入框：URL、视口、意图、选择器、结构路径、坐标、计算样式、DOM 路径和 HTML。不自动发送。页面文字、HTML 和样式是数据，不是指令。底栏「改」可改成「问」或「删」。不用调试器，也不操作你正在看的标签。`chrome://` 和扩展页不能选。
+在确认页查看截图和页面信息，为每条选择「改变」或「疑问」并填写 Request，最后明确点击「放入 DSH 草稿」。确认页不对网页开放，绑定随机审核 ID 与扩展标签；只有该页的确认才会保存标注。页面提供的文字、HTML、样式始终是数据，不是用户指令。标注放入当前 DSH 输入框，不自动提交对话。`chrome://` 和扩展页不能选。
 
 改了 `extension/` 之后，在扩展卡片上点重新加载。改了 Host 或 Client 后，完全退出 DeepSeek Harness（⌘Q）再打开。
 
-标注发送只有在本机主机确认保存后才显示成功；保存失败或断线会保留页面上的标注并显示错误。保存的标注在文字和图片成功插入输入框后才删除，插入失败可以重试。多个 DSH 窗口通过消费租约避免同时插入同一份标注。
+标注只有在本机主机确认保存后才显示成功；确定未发送或主机明确拒绝时允许重试。发送前先记录处理中状态；断线、超时或 worker 重启导致结果未确认时，同一审核会话不会盲目重发，请先检查 DSH。主机已保存但审核状态写入失败时会单独提示，不会误报标注保存失败。Host 检查 JPEG 编码、大小及实际解码结果，限制像素和解码内存；标注目录权限为 0700，文件为 0600。保存的标注在文字和图片成功插入且草稿持久化成功后才确认删除；持久化失败时，后续轮询仍会重试持久化，不会因为内存中已经插入就偷偷确认。多个 DSH 窗口通过消费租约避免同时插入同一份标注。
 
 插入前，插件先将目标会话和附件归属写入标注文件，并同步到磁盘。若在插入和确认之间崩溃，重启后不会自动再次插入：原会话中仍有完整文字和对应图片时，只补确认；无法确认时，保留标注并显示「重新放入草稿」和「已接收，完成确认」。请先检查草稿或已发送消息。选择恢复会补回图片，复用草稿中仍存在的完整标注文字，不覆盖其他文字和图片；已接收则只确认，不插入。其他会话只能看到回到原会话的提示。恢复期间再次中断，交付记录仍保留。
 
@@ -56,9 +58,21 @@ DeepSeek Harness 桌面插件。通过本机 Chrome 扩展，在**当前 Chrome*
 
 修复后须重新加载 Chrome 扩展并完全重启 DSH，使扩展、通信主机和 Client 同时使用新版本。归属记录使用 `chrome.storage.session`，扩展新增 `storage` 权限；旧版按组名识别的标签不会被新版自动认领或删除。
 
+## 桥接冲突与旧版本迁移
+
+- 同一 DSH_HOME 同时只支持一个 Chrome profile 的扩展通信主机和一个 DSH 控制连接。第二个连接明确返回忙碌；第二个 profile 显示冲突，不踢掉已有连接、不自动切换 profile。请在其它 profile 禁用扩展，再在目标 profile 重新加载。
+- 每个主机使用独立的随机 socket，退出只清理自己创建的端点。崩溃留下的随机失效端点会被忽略，不自动删除其它进程的文件。
+- 旧版固定端点 `$DSH_HOME/cache/dsh-chrome.sock` 不能安全探活：连接它就可能挤掉旧版控制器。新版发现它会明确拒绝连接，不自动删除。升级时完全退出 Chrome 和 DSH，确认旧通信主机已退出后，才可删除这个旧端点（默认 `~/.dsh/cache/dsh-chrome.sock`；不要删除整个 cache），然后重新打开并加载新版扩展。此清理只用于旧固定端点，不适用于新的随机端点。
+- 冲突状态跨扩展 service worker 重启保留；解决后通过工具栏操作、重新加载扩展或下一次 Chrome 启动显式重试，不持续偷偷抢占连接。
+
 ## 开发
 
 ```bash
-node --check lib/index.js lib/browser.js lib/page.js lib/tools.js lib/bridge-client.js lib/install.js lib/marks.js extension/background.js extension/picker.js extension/shot.js extension/crop.js host/bridge.mjs
-node --test
+pnpm install --frozen-lockfile
+for file in lib/*.js extension/*.js host/*.mjs; do
+  node --check "$file" || exit 1
+done
+node --test test/*.test.mjs
 ```
+
+测试包括真实隔离的 Unix socket / Native Host 进程、握手错误与进程竞争、iframe ref 路由、密码脱敏、文件策略、JPEG 真解码、标注持久化和可信确认页来源检查。VM / HTTP 浏览器夹具不等于已安装扩展端到端验收；后者必须在重载扩展并完整重启 DSH 后执行。

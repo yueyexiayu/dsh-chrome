@@ -1,6 +1,6 @@
 {
   "name": "chrome",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "DSH plugin: drive background tabs in the current Chrome, and send a picked element into the composer.",
   "type": "module",
@@ -20,5 +20,8 @@
         "@deepseek-ai/dsh-client-ui-conversation"
       ]
     }
+  },
+  "dependencies": {
+    "jpeg-js": "0.4.4"
   }
 }

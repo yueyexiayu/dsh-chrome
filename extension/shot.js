@@ -1,5 +1,3 @@
-import { cropSource } from "./crop.js";
-
 const MAX_EDGE = 1280;
 const MAX_BYTES = 450_000;
 
@@ -14,24 +12,6 @@ function outputSize(sw, sh) {
 
 async function blobOf(canvas, quality) {
   return canvas.convertToBlob({ type: "image/jpeg", quality });
-}
-
-async function encode(bitmap, source) {
-  const size = outputSize(source.sw, source.sh);
-  const canvas = new OffscreenCanvas(size.width, size.height);
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("无法裁剪标注图");
-  ctx.drawImage(bitmap, source.sx, source.sy, source.sw, source.sh, 0, 0, size.width, size.height);
-  const stroke = source.stroke;
-  ctx.strokeStyle = "#e23d3d";
-  ctx.lineWidth = Math.max(2, Math.round(3 * source.scale * size.scale));
-  ctx.strokeRect(
-    stroke.x * size.scale,
-    stroke.y * size.scale,
-    stroke.width * size.scale,
-    stroke.height * size.scale,
-  );
-  return jpegFromCanvas(canvas);
 }
 
 function bytesToBase64(bytes) {
@@ -89,18 +69,6 @@ export async function jpegBoxes(dataUrl, boxes, viewport) {
       ctx.fillText(label, x + pad, labelY + font);
     });
     return jpegFromCanvas(canvas);
-  } finally {
-    bitmap.close();
-  }
-}
-
-export async function jpegCrop(dataUrl, box, viewport) {
-  const blob = await (await fetch(dataUrl)).blob();
-  const bitmap = await createImageBitmap(blob);
-  try {
-    const source = cropSource(box, viewport, bitmap.width, bitmap.height);
-    if (!source) throw new Error("元素不在可视区域");
-    return encode(bitmap, source);
   } finally {
     bitmap.close();
   }

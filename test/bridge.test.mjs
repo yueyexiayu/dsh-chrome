@@ -7,9 +7,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createFrameParser, encodeFrame } from "../lib/frame.js";
-import { EXTENSION_ID, HOST_NAME, nativeHostManifest, pluginRoot } from "../lib/install.js";
+import { EXTENSION_ID, HOST_NAME, nativeHostManifest, pluginRoot, socketPaths } from "../lib/install.js";
 import { GROUP_TITLE, canPick, groupTitle, ignoreFocusMethod, tabCreateProperties, windowCreateProperties } from "../extension/policy.js";
 import { contextKey } from "../lib/owner.js";
+import { JPEG } from "./fixtures/jpeg.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -56,15 +57,18 @@ test("host stores a page mark without forwarding it to the tool socket", async (
     env: { ...process.env, DSH_HOME: home },
     stdio: ["pipe", "pipe", "pipe"],
   });
-  const sock = path.join(home, "cache", "dsh-chrome.sock");
-  const socket = await waitForConnect(sock);
+  const socket = await waitForConnect(home);
   try {
     const fromHost = collect(child.stdout);
     const fromSocket = collect(socket);
+    child.stdin.write(encodeFrame({ id: "mark:invalid", method: "DSH.mark", params: { url: "chrome://settings", image: JPEG } }));
+    const rejected = await fromHost.next();
+    assert.equal(rejected.error.code, "MARK_NOT_SAVED");
+    assert.match(rejected.error.message, /http/);
     child.stdin.write(encodeFrame({
       id: "mark:test",
       method: "DSH.mark",
-      params: { url: "https://example.com", selector: "#box", image: "aGVsbG8=" },
+      params: { url: "https://example.com", selector: "#box", image: JPEG },
     }));
     const ack = await fromHost.next();
     assert.equal(ack.id, "mark:test");
@@ -103,7 +107,10 @@ test("extension source does not activate a tab or window", () => {
   assert.match(source, /windowCreateProperties\(/);
   assert.match(source, /ignoreFocusMethod\(/);
   assert.match(source, /groupTitle\(owner\)/);
-  assert.doesNotMatch(source, /active:\s*true/);
+  // The explicit toolbar edit action may show its trusted confirmation page;
+  // tool-created/controlled tabs must still never activate a tab or window.
+  const withoutUserReview = source.replace('chrome.tabs.update(reviewTab.id, { url: reviewUrl(id), active: true })', 'USER_REVIEW');
+  assert.doesNotMatch(withoutUserReview, /active:\s*true/);
   assert.doesNotMatch(source, /focused:\s*true/);
   assert.doesNotMatch(source, /bringToFront/);
 });
@@ -115,8 +122,7 @@ test("host relays socket commands to the extension and replies back", async () =
     env: { ...process.env, DSH_HOME: home },
     stdio: ["pipe", "pipe", "pipe"],
   });
-  const sock = path.join(home, "cache", "dsh-chrome.sock");
-  const socket = await waitForConnect(sock);
+  const socket = await waitForConnect(home);
   try {
     const fromHost = collect(child.stdout);
     socket.write(encodeFrame({ id: 7, method: "DSH.hello" }));
@@ -155,10 +161,13 @@ function collect(stream) {
   };
 }
 
-function waitForConnect(sock) {
+function waitForConnect(home) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
     const tryOnce = () => {
+      if (Date.now() - started > 3000) return reject(new Error("native host did not start"));
+      const sock = socketPaths(home)[0];
+      if (!sock) return setTimeout(tryOnce, 50);
       const socket = net.connect(sock);
       socket.once("connect", () => resolve(socket));
       socket.once("error", () => {

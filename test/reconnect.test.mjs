@@ -8,6 +8,8 @@ import test from "node:test";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import { createFrameParser, encodeFrame } from "../lib/frame.js";
+import { socketPaths } from "../lib/install.js";
+import { JPEG } from "./fixtures/jpeg.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -27,10 +29,12 @@ function frames(stream) {
   };
 }
 
-async function connect(sock) {
+async function connect(home) {
   const until = Date.now() + 3000;
   while (Date.now() < until) {
     try {
+      const sock = socketPaths(home)[0];
+      if (!sock) { await sleep(20); continue; }
       return await new Promise((resolve, reject) => {
         const socket = net.connect(sock);
         socket.once("connect", () => resolve(socket));
@@ -51,18 +55,20 @@ function host(t, home) {
     if (child.exitCode === null && child.signalCode === null) await exited;
     rmSync(home, { recursive: true, force: true });
   });
-  return { child, output: frames(child.stdout), sock: path.join(home, "cache/dsh-chrome.sock") };
+  return { child, output: frames(child.stdout), home };
 }
 
-test("a late response from the replaced connection cannot resolve a new client's reused id", { timeout: 10000 }, async (t) => {
+test("a late response from a disconnected client cannot resolve a new client's reused id", { timeout: 10000 }, async (t) => {
   const home = mkdtempSync(path.join(tmpdir(), "chrome-reconnect-"));
   const h = host(t, home);
-  const old = await connect(h.sock);
+  const old = await connect(h.home);
   old.on("error", () => {});
   t.after(() => old.destroy());
   old.write(encodeFrame({ id: 1, method: "DSH.hello" }));
   const first = await h.output.next();
-  const current = await connect(h.sock);
+  old.destroy();
+  await sleep(30);
+  const current = await connect(h.home);
   t.after(() => current.destroy());
   const responses = frames(current);
   current.write(encodeFrame({ id: 1, method: "DSH.hello" }));
@@ -83,16 +89,16 @@ test("the host returns an explicit save error with the original mark request id"
   mkdirSync(path.join(home, "cache"));
   writeFileSync(path.join(home, "cache/dsh-chrome-marks"), "blocked-directory");
   const h = host(t, home);
-  const socket = await connect(h.sock);
+  const socket = await connect(h.home);
   t.after(() => socket.destroy());
-  h.child.stdin.write(encodeFrame({ id: "mark:failure", method: "DSH.mark", params: { url: "https://example.com", image: "aGVsbG8=" } }));
+  h.child.stdin.write(encodeFrame({ id: "mark:failure", method: "DSH.mark", params: { url: "https://example.com", image: JPEG } }));
   const response = await h.output.next();
   assert.equal(response.id, "mark:failure");
   assert.equal(response.result, undefined);
   assert.match(response.error.message, /EEXIST|ENOTDIR/);
 });
 
-test("unanswered native requests expire after 60 seconds and their late replies are discarded", () => {
+test("unanswered native requests expire after 60 seconds and their late replies are discarded", async () => {
   const timers = new Map();
   const nativeFrames = [];
   const replies = [];
@@ -100,13 +106,14 @@ test("unanswered native requests expire after 60 seconds and their late replies 
   let accept;
   let nextTimer = 0;
   const context = vm.createContext({
-    fs: { mkdirSync() {}, unlinkSync() {}, chmodSync() {} },
+    fs: { mkdirSync() {}, unlinkSync() {}, chmodSync() {}, lstatSync() { return { dev: 1, ino: 1, isSocket: () => true }; } },
+    socketPaths() { return []; },
     net: { createServer(fn) { accept = fn; return { listen(_sock, fn) { fn(); }, on() {} }; } },
     os: { homedir() { return "/mock-home"; } }, path,
     randomBytes() { return Buffer.alloc(16); }, createFrameParser, encodeFrame,
     saveMark() { throw new Error("unexpected mark write"); },
     process: {
-      env: { DSH_HOME: "/mock-home" },
+      env: { DSH_HOME: "/mock-home" }, on() {},
       stdin: { on(name, fn) { stdinListeners[name] = fn; } },
       stdout: { write(frame) { createFrameParser((message) => nativeFrames.push(message)).push(frame); } },
       stderr: { write(message) { throw new Error(message); } },
@@ -117,6 +124,7 @@ test("unanswered native requests expire after 60 seconds and their late replies 
   });
   const source = readFileSync(path.join(root, "host/bridge.mjs"), "utf8").replace(/^import .*;\n/gm, "");
   vm.runInContext(`${source}\nglobalThis.pendingCount = () => pending.size;`, context);
+  await Promise.resolve();
   const handlers = {};
   const socket = {
     destroyed: false, on(name, fn) { handlers[name] = fn; },
