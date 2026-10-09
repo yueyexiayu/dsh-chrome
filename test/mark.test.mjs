@@ -232,7 +232,7 @@ async function clientFixture(options = {}) {
       if (snapshot.phase === "submitting") return false;
       snapshot.attachmentIds = snapshot.attachmentIds.filter(value => value !== id); return true;
     },
-    notify: (_level, message) => notices.push(message),
+    notify: options.omitNotify ? undefined : (_level, message) => notices.push(message),
   };
   const binding = { ctx: {} };
   const conversation = {
@@ -254,7 +254,7 @@ async function clientFixture(options = {}) {
   let getGate = null;
   let prepareGate = null;
   const ctx = {
-    get: name => name === "sessions" ? { binding: () => binding } : name === "conversation" ? conversation : undefined,
+    get: name => options.missingShell ? null : name === "sessions" ? { binding: () => binding } : name === "conversation" ? conversation : undefined,
     slots: { inject(_slot, fn) { fn(); }, register(_declaration, component) { Wrapper = component; } },
   };
   runInNewContext(readFileSync(path.join(root, "lib", "client.js"), "utf8"), {
@@ -288,9 +288,25 @@ async function clientFixture(options = {}) {
       addEventListener() {}, removeEventListener() {},
     },
     document: { visibilityState: "visible", hasFocus: () => true },
-    File, Uint8Array, Date, atob, AbortSignal,
+    File, Uint8Array, Date, atob,
+    AbortSignal: {
+      timeout(ms) {
+        stats.timeoutMs = ms;
+        if (options.immediateTimeout) {
+          const controller = new AbortController();
+          controller.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+          return controller.signal;
+        }
+        return AbortSignal.timeout(ms);
+      },
+    },
     setInterval(fn) { intervals.add(fn); return fn; }, clearInterval(fn) { intervals.delete(fn); },
     fetch: async (_url, init = {}) => {
+      if (init.signal?.aborted) {
+        const error = new Error("The operation was aborted due to timeout");
+        error.name = "TimeoutError";
+        throw error;
+      }
       if (init.method === "POST") {
         const payload = JSON.parse(init.body);
         if (payload.action === "prepare" || payload.action === "retry") {
@@ -440,6 +456,41 @@ test("shipped Client releases rather than consumes a response received after unm
     assert.equal(fixture.stats.insertions, 0);
     assert.equal(fixture.remaining(), 1);
     assert.equal(fixture.stats.releases, 1);
+  } finally { fixture.close(); }
+});
+
+test("missing shell leaves the poll error in the rendered alert", async () => {
+  const fixture = await clientFixture({ missingShell: true });
+  try {
+    const alert = fixture.nodes().find(node => node.props?.role === "alert");
+    assert.ok(alert, "expected a visible alert");
+    assert.match(JSON.stringify(alert.props.children), /标注等待可用的会话输入框/);
+    assert.equal(fixture.notices.length, 0);
+    assert.equal(fixture.nodes().some(node => node.props?.["data-chrome-mark"] === "1"), false);
+    assert.equal(fixture.stats.insertions, 0);
+  } finally { fixture.close(); }
+});
+
+test("poll errors stay visible when the shell cannot notify", async () => {
+  const fixture = await clientFixture({ failGet: true, omitNotify: true });
+  try {
+    const alert = fixture.nodes().find(node => node.props?.role === "alert");
+    assert.ok(alert, "expected a visible alert");
+    assert.match(JSON.stringify(alert.props.children), /fixture read unavailable/);
+    assert.equal(fixture.notices.length, 0);
+    assert.equal(fixture.nodes().some(node => node.props?.["data-chrome-mark"] === "1"), false);
+  } finally { fixture.close(); }
+});
+
+test("mark requests time out after 15 seconds as a visible failure", async () => {
+  const fixture = await clientFixture({ immediateTimeout: true, omitNotify: true });
+  try {
+    assert.equal(fixture.stats.timeoutMs, 15_000);
+    const alert = fixture.nodes().find(node => node.props?.role === "alert");
+    assert.ok(alert, "expected a visible timeout alert");
+    assert.match(JSON.stringify(alert.props.children), /标注请求超时/);
+    assert.equal(fixture.stats.insertions, 0);
+    assert.equal(fixture.remaining(), 1);
   } finally { fixture.close(); }
 });
 
