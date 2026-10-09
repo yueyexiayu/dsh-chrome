@@ -2,6 +2,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createFrameParser, encodeFrame } from "../lib/frame.js";
 import { saveMark } from "../lib/marks.js";
@@ -18,6 +19,59 @@ let ready = false;
 let client = null;
 let nextRequest = 0;
 const pending = new Map();
+// Set by the first path-checked DSH.auth. Kept only in this process.
+// A later connection must present the same token and still pass the path check.
+let sessionToken = null;
+const TOKEN_RE = /^[0-9a-f]{64}$/i;
+const ALLOW_NODE = process.env.DSH_CHROME_ALLOW_NODE_PEER === "1";
+
+function sameToken(left, right) {
+  const a = String(left || "").toLowerCase();
+  const b = String(right || "").toLowerCase();
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+function peerHelper() {
+  return path.join(path.dirname(process.argv?.[1] || ""), "peerpath");
+}
+
+// Dup the accepted socket before the helper runs. The child must not close the
+// fd this process is still reading. spawnSync also dups stdio, and we close
+// only the extra parent dup.
+function peerExecutable(socket) {
+  const fd = socket?._handle?.fd;
+  if (typeof fd !== "number" || fd < 0) return "";
+  let duped = null;
+  try {
+    if (typeof fs.openSync === "function") {
+      try { duped = fs.openSync(`/dev/fd/${fd}`, "r"); } catch { duped = null; }
+    }
+    const passed = duped ?? fd;
+    const result = spawnSync(peerHelper(), [], {
+      stdio: ["ignore", "pipe", "pipe", passed],
+      timeout: 1000,
+    });
+    if (!result || result.status !== 0) return "";
+    return String(result.stdout || "").replace(/\0/g, "").trim();
+  } catch {
+    return "";
+  } finally {
+    if (duped != null && typeof fs.closeSync === "function") {
+      try { fs.closeSync(duped); } catch { /* the original socket stays open */ }
+    }
+  }
+}
+
+function peerAllowed(exe) {
+  if (!exe || exe.includes("\0")) return false;
+  if (exe.includes("/DeepSeek Harness.app/")) return true;
+  // Test hosts set this when they spawn. Chrome's native-host launch does not.
+  if (ALLOW_NODE && path.basename(exe) === "node") return true;
+  return false;
+}
 
 function forget(socket) {
   for (const [id, request] of pending) {
@@ -71,10 +125,32 @@ process.stdin.on("data", (chunk) => {
 process.stdin.on("end", () => process.exit(0));
 
 const server = net.createServer((socket) => {
+  // Path check happens before any frame is parsed. A denied peer is destroyed
+  // without a parser, so DSH.hello cannot be forwarded.
+  const exe = peerExecutable(socket);
+  if (!peerAllowed(exe)) {
+    socket.destroy();
+    return;
+  }
+  let authed = false;
   // Discovery probes do not claim the single controller slot. Only a valid
   // request can claim it, and another controller receives an explicit error.
   const admission = setTimeout(() => socket.destroy(), 5000);
   const fromPlugin = createFrameParser((message) => {
+    if (!authed) {
+      const token = typeof message?.token === "string" ? message.token : "";
+      if (message?.method !== "DSH.auth" || !TOKEN_RE.test(token) || (sessionToken && !sameToken(token, sessionToken))) {
+        socket.destroy();
+        return;
+      }
+      if (!sessionToken) sessionToken = token.toLowerCase();
+      authed = true;
+      return;
+    }
+    if (message?.method === "DSH.auth") {
+      socket.destroy();
+      return;
+    }
     if (message?.id == null || typeof message.method !== "string") {
       socket.destroy(new Error("browser request must have an id and method"));
       return;

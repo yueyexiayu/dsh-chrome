@@ -12,6 +12,10 @@ import { socketPaths } from "../lib/install.js";
 import { JPEG } from "./fixtures/jpeg.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const TOKEN = "ab".repeat(32);
+function claim(socket) {
+  socket.write(encodeFrame({ method: "DSH.auth", token: TOKEN }));
+}
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function frames(stream) {
@@ -47,7 +51,7 @@ async function connect(home) {
 
 function host(t, home) {
   const child = spawn(process.execPath, [path.join(root, "host/bridge.mjs")], {
-    env: { ...process.env, DSH_HOME: home }, stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, DSH_HOME: home, DSH_CHROME_ALLOW_NODE_PEER: "1" }, stdio: ["pipe", "pipe", "pipe"],
   });
   t.after(async () => {
     const exited = new Promise((resolve) => child.once("exit", resolve));
@@ -64,6 +68,7 @@ test("a late response from a disconnected client cannot resolve a new client's r
   const old = await connect(h.home);
   old.on("error", () => {});
   t.after(() => old.destroy());
+  claim(old);
   old.write(encodeFrame({ id: 1, method: "DSH.hello" }));
   const first = await h.output.next();
   old.destroy();
@@ -71,6 +76,7 @@ test("a late response from a disconnected client cannot resolve a new client's r
   const current = await connect(h.home);
   t.after(() => current.destroy());
   const responses = frames(current);
+  claim(current);
   current.write(encodeFrame({ id: 1, method: "DSH.hello" }));
   const second = await h.output.next();
   assert.notEqual(first.id, second.id);
@@ -111,9 +117,10 @@ test("unanswered native requests expire after 60 seconds and their late replies 
     net: { createServer(fn) { accept = fn; return { listen(_sock, fn) { fn(); }, on() {} }; } },
     os: { homedir() { return "/mock-home"; } }, path,
     randomBytes() { return Buffer.alloc(16); }, createFrameParser, encodeFrame,
+    spawnSync() { return { status: 0, stdout: Buffer.from("/usr/local/bin/node\n") }; },
     saveMark() { throw new Error("unexpected mark write"); },
     process: {
-      env: { DSH_HOME: "/mock-home" }, on() {},
+      env: { DSH_HOME: "/mock-home", DSH_CHROME_ALLOW_NODE_PEER: "1" }, argv: ["/usr/local/bin/node", "/mock/bridge.mjs"], on() {},
       stdin: { on(name, fn) { stdinListeners[name] = fn; } },
       stdout: { write(frame) { createFrameParser((message) => nativeFrames.push(message)).push(frame); } },
       stderr: { write(message) { throw new Error(message); } },
@@ -127,11 +134,12 @@ test("unanswered native requests expire after 60 seconds and their late replies 
   await Promise.resolve();
   const handlers = {};
   const socket = {
-    destroyed: false, on(name, fn) { handlers[name] = fn; },
+    destroyed: false, _handle: { fd: 3 }, on(name, fn) { handlers[name] = fn; },
     write(frame) { createFrameParser((message) => replies.push(message)).push(frame); },
     destroy() { this.destroyed = true; },
   };
   accept(socket);
+  handlers.data(encodeFrame({ method: "DSH.auth", token: TOKEN }));
   handlers.data(encodeFrame({ id: 1, method: "DSH.hello" }));
   assert.equal(context.pendingCount(), 1);
   assert.equal(timers.size, 1);

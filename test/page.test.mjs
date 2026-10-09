@@ -137,6 +137,18 @@ test("page scripts parse and keep a ref registry", () => {
   ], { pattern: "MyApp", onlyErrors: true, limit: 10 }).map((entry) => entry.text), ["MyApp failed"]);
   assert.equal(selectNetwork([{ url: "https://a.test/api" }, { url: "https://b.test" }], "/api", 10).length, 1);
   assert.match(formatCookies([{ name: "access_token", value: "secret", domain: ".example.com" }], true), /redacted/);
+  for (const name of ["jwt", "sid", "bearer", "auth", "csrf"]) {
+    const hidden = formatCookies([{ name, value: "secret-value", domain: ".example.com" }], true);
+    assert.match(hidden, /redacted/);
+    assert.doesNotMatch(hidden, /secret-value/);
+  }
+  const httpOnly = formatCookies([{ name: "theme", value: "dark", domain: ".example.com", httpOnly: true }], true);
+  assert.match(httpOnly, /••••/);
+  assert.match(httpOnly, /redacted/);
+  assert.doesNotMatch(httpOnly, /dark/);
+  assert.match(formatCookies([{ name: "name", value: "ada", domain: ".example.com" }], true), /ada/);
+  assert.match(formatCookies([{ name: "author", value: "ada", domain: ".example.com" }], true), /ada/);
+  assert.doesNotMatch(formatCookies([{ name: "lang", value: "zh", domain: ".example.com" }], false), /zh/);
   assert.equal(assertBatch([{ action: "click", ref: 1 }])[0].action, "click");
   assert.throws(() => assertBatch([{ action: "nope" }]), /action/);
   assert.equal(assertSelector("button"), "button");

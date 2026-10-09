@@ -13,17 +13,26 @@ function harness(send, overrides = {}) {
   const calls = [];
   const current = { sessionId: 'tab', contexts: new Map([[7, { id: 7, frameId: 'child' }]]), refOwners: new Map([[99, { contextId: 7, localRef: 0 }]]), cdp: { async send(method, params) {
     calls.push({ method, params });
-    return await send?.(method, params) ?? {};
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: params?.frameId === 'child' ? 71 : 70 };
+    const custom = await send?.(method, params);
+    if (method === 'Page.getFrameTree' && !custom?.frameTree) return { frameTree: { frame: { id: 'top' } } };
+    return custom ?? {};
   } } };
   const context = { ...page, path, Buffer, process, console, setTimeout, clearTimeout, AbortController, Math, Date, current,
     randomUUID: () => 'test-unique', constants: { X_OK: 1 }, access: async () => {},
     assertBrowserPath: async (file) => file, writeBrowserFile: async (file) => file, readBrowserFile: async () => Buffer.from('png'), ...overrides };
-  vm.runInNewContext(source + '\nensure=async()=>current; observe=async()=>"snapshot"; globalThis.api={upload,screenshot,gif,getText,evaluateInPage,fill,a11y,element,uploadImage,delay};', context);
+  vm.runInNewContext(source + '\nensure=async()=>current; observe=async()=>"snapshot"; pages.set("test", current); globalThis.api={upload,screenshot,gif,getText,evaluateInPage,fill,a11y,element,uploadImage,delay,onBrowserEvent,query,storage};', context);
   return { api: context.api, calls, current };
 }
 
 test('ref reads, evaluation, fill and uploads use iframe context and local ref', async () => {
-  const { api, calls, current } = harness((method) => method === 'Runtime.evaluate' ? { result: { objectId: 'input', value: { ok: true, text: 'child', results: [{ ref: 0, ok: true }] } } } : {});
+  const { api, calls, current } = harness((method) => {
+    if (method === 'Runtime.evaluate') return { result: { objectId: 'input', value: { ok: true, text: 'child', results: [{ ref: 0, ok: true }] } } };
+    if (method === 'DOM.describeNode') return { node: { backendNodeId: 3 } };
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'page-node' } };
+    if (method === 'Runtime.callFunctionOn') return { result: { value: 'from-page' } };
+    return {};
+  });
   await api.getText({ ref: 99 });
   await api.evaluateInPage('element.textContent', undefined, 99);
   await api.fill([{ ref: 99, value: 'hello' }]);
@@ -33,12 +42,20 @@ test('ref reads, evaluation, fill and uploads use iframe context and local ref',
   const evaluations = calls.filter((call) => call.method === 'Runtime.evaluate');
   assert.equal(evaluations.length, 5);
   for (const { params } of evaluations) {
-    assert.equal(params.contextId, 7);
+    assert.equal(params.contextId, 71);
     assert.doesNotMatch(params.expression, /(?:ref = 99|__dshRefs\[99\]|"ref":99)/);
   }
   assert.match(evaluations[0].params.expression, /var ref = 0/);
   assert.match(evaluations[1].params.expression, /__dshRefs\[0\]/);
   assert.match(evaluations[2].params.expression, /"ref":0/);
+  const world = calls.find((call) => call.method === 'Page.createIsolatedWorld');
+  assert.equal(world.params.worldName, 'dsh-chrome-refs');
+  assert.equal(world.params.grantUniveralAccess, true);
+  assert.equal(world.params.frameId, 'child');
+  const userCall = calls.find((call) => call.method === 'Runtime.callFunctionOn' && String(call.params.functionDeclaration).includes('element.textContent'));
+  assert.ok(userCall);
+  assert.equal(userCall.params.contextId, undefined);
+  assert.equal(calls.find((call) => call.method === 'DOM.resolveNode' && call.params.backendNodeId === 3).params.executionContextId, 7);
 });
 
 test('upload preserves policy errors and does not touch page or misreport missing file', async () => {
@@ -124,9 +141,15 @@ test('a11y replaces stale ownership only after staging references', async () => 
   current.refOwners = new Map([[0, { contextId: 7, localRef: 42 }]]);
   const output = await api.a11y({});
   assert.match(output, /outside/);
-  assert.equal(current.refOwners.has(0), false);
+  assert.equal(current.refOwners.get(0).contextId, 70);
+  assert.equal(current.refOwners.get(0).localRef, 0);
+  assert.notEqual(current.refOwners.get(0).localRef, 42);
   const commit = calls.find((call) => call.method === 'Runtime.evaluate' && call.params.expression.includes('window.__dshRefs = window['));
   assert.ok(commit);
+  assert.equal(commit.params.contextId, 70);
+  const world = calls.find((call) => call.method === 'Page.createIsolatedWorld');
+  assert.equal(world.params.worldName, 'dsh-chrome-refs');
+  assert.equal(world.params.grantUniveralAccess, true);
   assert.ok(!calls.some((call) => call.params?.expression === 'window.__dshRefs = []'));
 });
 
@@ -136,8 +159,9 @@ test('a11y subtree resolves original iframe ref, restricts nodes, and remaps ret
   assert.match(output, /inside/);
   assert.doesNotMatch(output, /outside/);
   assert.equal(calls.find((call) => call.method === 'Accessibility.getFullAXTree').params.frameId, 'child');
-  assert.equal(calls.find((call) => call.method === 'DOM.resolveNode').params.executionContextId, 7);
-  assert.equal(current.refOwners.get(0).contextId, 7);
+  assert.equal(calls.find((call) => call.method === 'DOM.resolveNode').params.executionContextId, 71);
+  assert.equal(current.refOwners.get(0).contextId, 71);
+  assert.ok(calls.some((call) => call.method === 'Page.createIsolatedWorld' && call.params.frameId === 'child' && call.params.grantUniveralAccess === true));
   assert.equal(current.refOwners.get(0).localRef, 0);
   assert.equal(current.refOwners.has(99), false);
 });
@@ -145,7 +169,7 @@ test('a11y subtree resolves original iframe ref, restricts nodes, and remaps ret
 test('a11y fallback also updates ownership in the selected context', async () => {
   const { api, current } = axHarness(true);
   assert.match(await api.a11y({ ref: 99 }), /dom-fallback/);
-  assert.equal(current.refOwners.get(0).contextId, 7);
+  assert.equal(current.refOwners.get(0).contextId, 71);
   assert.equal(current.refOwners.has(99), false);
 });
 
@@ -192,4 +216,34 @@ test('radio false is honored rather than silently checking the control', () => {
   const result = vm.runInNewContext(page.fillScript([{ ref: 0, value: 'false' }]), context);
   assert.equal(result.ok, true);
   assert.equal(el.checked, false);
+});
+
+test('frame navigation rebuilds the isolated ref world and recollects refs', async () => {
+  const { api, calls, current } = harness((method) => method === 'Runtime.evaluate' ? { result: { value: { ok: true, elements: [], offscreen: [] } } } : {});
+  current.mainFrameId = 'top';
+  current.refWorlds = new Map([['top', 70]]);
+  current.refWorldIds = new Set([70]);
+  current.refWorldFrames = new Map([[70, 'top']]);
+  api.onBrowserEvent({ method: 'Page.frameNavigated', sessionId: 'tab', params: { frame: { id: 'top' } } });
+  await current.refCollect;
+  const created = calls.filter((call) => call.method === 'Page.createIsolatedWorld');
+  assert.equal(created.length, 1);
+  assert.equal(created[0].params.worldName, 'dsh-chrome-refs');
+  assert.equal(created[0].params.grantUniveralAccess, true);
+  assert.equal(created[0].params.frameId, 'top');
+  const collected = calls.find((call) => call.method === 'Runtime.evaluate' && String(call.params.expression).includes('__dshRefs'));
+  assert.equal(collected.params.contextId, 70);
+});
+
+test('httpOnly cookies are passed to formatCookies and stay redacted', async () => {
+  const { api, calls } = harness((method) => method === 'Network.getCookies' ? { cookies: [
+    { name: 'theme', value: 'dark', domain: '.example.com', httpOnly: true },
+    { name: 'lang', value: 'zh', domain: '.example.com', httpOnly: false },
+  ] } : {});
+  const text = await api.storage({ area: 'cookie', action: 'list', showValues: true });
+  assert.equal(calls.find((call) => call.method === 'Network.getCookies').params.httpOnly, undefined);
+  assert.match(text, /theme/);
+  assert.match(text, /redacted/);
+  assert.doesNotMatch(text, /dark/);
+  assert.match(text, /zh/);
 });

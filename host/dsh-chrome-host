@@ -11,4 +11,9 @@ if [ -z "$node" ]; then
   echo "dsh-chrome-host: node not found" >&2
   exit 1
 fi
+helper="$dir/peerpath"
+src="$dir/peerpath.c"
+if [ ! -x "$helper" ] || [ "$src" -nt "$helper" ]; then
+  clang -O2 -o "$helper" "$src" || exit 1
+fi
 exec "$node" "$dir/bridge.mjs"

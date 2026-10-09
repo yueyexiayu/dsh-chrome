@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -13,6 +13,19 @@ import { contextKey } from "../lib/owner.js";
 import { JPEG } from "./fixtures/jpeg.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const TOKEN = "ab".repeat(32);
+const OTHER_TOKEN = "cd".repeat(32);
+
+function hostEnv(home, allowNode = true) {
+  const env = { ...process.env, DSH_HOME: home };
+  if (allowNode) env.DSH_CHROME_ALLOW_NODE_PEER = "1";
+  else delete env.DSH_CHROME_ALLOW_NODE_PEER;
+  return env;
+}
+
+function auth(socket, token = TOKEN) {
+  socket.write(encodeFrame({ method: "DSH.auth", token }));
+}
 
 test("frames round-trip a command", () => {
   const encoded = encodeFrame({ id: 1, method: "DSH.hello" });
@@ -39,6 +52,10 @@ test("native host manifest is bound to this extension", () => {
   assert.equal(manifest.name, HOST_NAME);
   assert.deepEqual(manifest.allowed_origins, [`chrome-extension://${EXTENSION_ID}/`]);
   assert.equal(manifest.path, path.join(pluginRoot(), "host", "dsh-chrome-host"));
+  assert.equal(JSON.stringify(manifest).includes("DSH_CHROME_ALLOW_NODE_PEER"), false);
+  assert.doesNotMatch(readFileSync(path.join(root, "host", "dsh-chrome-host"), "utf8"), /DSH_CHROME_ALLOW_NODE_PEER/);
+  const background = readFileSync(path.join(root, "extension", "background.js"), "utf8");
+  assert.doesNotMatch(background, /DSH\.auth/);
 });
 
 test("conversations get separate tab groups", () => {
@@ -54,13 +71,14 @@ test("host stores a page mark without forwarding it to the tool socket", async (
   const home = mkdtempSync(path.join(tmpdir(), "dsh-chrome-"));
   const child = spawn(path.join(root, "host", "dsh-chrome-host"), {
     cwd: root,
-    env: { ...process.env, DSH_HOME: home },
+    env: hostEnv(home),
     stdio: ["pipe", "pipe", "pipe"],
   });
   const socket = await waitForConnect(home);
   try {
     const fromHost = collect(child.stdout);
     const fromSocket = collect(socket);
+    auth(socket);
     child.stdin.write(encodeFrame({ id: "mark:invalid", method: "DSH.mark", params: { url: "chrome://settings", image: JPEG } }));
     const rejected = await fromHost.next();
     assert.equal(rejected.error.code, "MARK_NOT_SAVED");
@@ -119,12 +137,13 @@ test("host relays socket commands to the extension and replies back", async () =
   const home = mkdtempSync(path.join(tmpdir(), "dsh-chrome-"));
   const child = spawn(path.join(root, "host", "dsh-chrome-host"), {
     cwd: root,
-    env: { ...process.env, DSH_HOME: home },
+    env: hostEnv(home),
     stdio: ["pipe", "pipe", "pipe"],
   });
   const socket = await waitForConnect(home);
   try {
     const fromHost = collect(child.stdout);
+    auth(socket);
     socket.write(encodeFrame({ id: 7, method: "DSH.hello" }));
     const outbound = await fromHost.next();
     assert.equal(outbound.method, "DSH.hello");
@@ -137,6 +156,116 @@ test("host relays socket commands to the extension and replies back", async () =
     child.kill();
   }
 });
+
+test("hello without a first-frame token is not forwarded", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "dsh-chrome-"));
+  const child = spawn(path.join(root, "host", "dsh-chrome-host"), {
+    cwd: root,
+    env: hostEnv(home),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const socket = await waitForConnect(home);
+  try {
+    const fromHost = collect(child.stdout);
+    socket.write(encodeFrame({ id: 7, method: "DSH.hello" }));
+    await expectNoForward(fromHost);
+    await waitClosed(socket);
+  } finally {
+    socket.destroy();
+    child.kill();
+  }
+});
+
+test("a node peer is rejected unless the test host allows it", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "dsh-chrome-"));
+  const child = spawn(path.join(root, "host", "dsh-chrome-host"), {
+    cwd: root,
+    env: hostEnv(home, false),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const socket = await waitForConnect(home);
+  try {
+    const fromHost = collect(child.stdout);
+    auth(socket);
+    socket.write(encodeFrame({ id: 7, method: "DSH.hello" }));
+    await expectNoForward(fromHost);
+    await waitClosed(socket);
+  } finally {
+    socket.destroy();
+    child.kill();
+  }
+});
+
+test("a second connection must present the token set by the first", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "dsh-chrome-"));
+  const child = spawn(path.join(root, "host", "dsh-chrome-host"), {
+    cwd: root,
+    env: hostEnv(home),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const first = await waitForConnect(home);
+  try {
+    const fromHost = collect(child.stdout);
+    auth(first);
+    first.write(encodeFrame({ id: 1, method: "DSH.hello" }));
+    assert.equal((await fromHost.next()).method, "DSH.hello");
+    const second = await waitForConnect(home);
+    auth(second, OTHER_TOKEN);
+    second.write(encodeFrame({ id: 2, method: "DSH.hello" }));
+    await expectNoForward(fromHost);
+    await waitClosed(second);
+    second.destroy();
+  } finally {
+    first.destroy();
+    child.kill();
+  }
+});
+
+test("peerpath reports the connected executable without closing the parent socket", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-peer-"));
+  const sock = path.join(dir, "s");
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen(sock, resolve));
+  const client = net.connect(sock);
+  const socket = await new Promise((resolve) => server.once("connection", resolve));
+  await new Promise((resolve) => client.once("connect", resolve));
+  try {
+    const duped = openSync(`/dev/fd/${socket._handle.fd}`, "r");
+    const result = spawnSync(path.join(root, "host", "peerpath"), [], { stdio: ["ignore", "pipe", "pipe", duped] });
+    closeSync(duped);
+    assert.equal(result.status, 0);
+    assert.equal(path.basename(String(result.stdout).trim()), "node");
+    socket.write("still-open");
+    const got = await new Promise((resolve) => client.once("data", resolve));
+    assert.equal(got.toString(), "still-open");
+    assert.equal(socket.destroyed, false);
+  } finally {
+    client.destroy();
+    socket.destroy();
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function expectNoForward(fromHost) {
+  return Promise.race([
+    fromHost.next().then((message) => {
+      throw new Error(`forwarded ${message.method || "frame"}`);
+    }),
+    new Promise((resolve) => setTimeout(resolve, 250)),
+  ]);
+}
+
+function waitClosed(socket) {
+  if (socket.destroyed) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, 500);
+    socket.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
 
 function collect(stream) {
   const queued = [];

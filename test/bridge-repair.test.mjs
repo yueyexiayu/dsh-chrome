@@ -11,11 +11,16 @@ import { createFrameParser, encodeFrame } from "../lib/frame.js";
 import { socketPaths } from "../lib/install.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const TOKEN = "ab".repeat(32);
+function claim(socket) {
+  socket.write(encodeFrame({ method: "DSH.auth", token: TOKEN }));
+}
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const clientSource = fs.readFileSync(path.join(root, "lib/bridge-client.js"), "utf8")
   .replace(/^import .*;\n/gm, "").replace(/^export /gm, "");
 function clientApi(overrides = {}) {
   const context = vm.createContext({ net, createFrameParser, encodeFrame, setTimeout, clearTimeout,
+    randomBytes: (size) => Buffer.alloc(size, 7),
     installNativeHost: async () => {}, installMessage: () => "not connected", socketPaths: () => [], ...overrides });
   vm.runInContext(`${clientSource}\nglobalThis.api = { BridgeLink, hello, waitForSocket, connectBridge };`, context);
   return context.api;
@@ -129,7 +134,7 @@ function fixture(t) {
   });
   function start() {
     const child = spawn(process.execPath, [path.join(root, "host/bridge.mjs")], {
-      env: { ...process.env, DSH_HOME: home }, stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, DSH_HOME: home, DSH_CHROME_ALLOW_NODE_PEER: "1" }, stdio: ["pipe", "pipe", "pipe"],
     });
     const host = { child, output: frames(child.stdout), errors: "" };
     child.stderr.on("data", chunk => { host.errors += chunk; });
@@ -157,9 +162,11 @@ test("second DSH client receives BRIDGE_BUSY and cannot evict the first", { time
   const f = fixture(t), h = f.start();
   const endpoint = await f.endpoint();
   const first = await f.connect(endpoint), firstFrames = frames(first);
+  claim(first);
   first.write(encodeFrame({ id: 1, method: "DSH.hello" }));
   const request = await h.output.next();
   const second = await f.connect(endpoint), secondFrames = frames(second);
+  claim(second);
   second.write(encodeFrame({ id: 99, method: "DSH.hello" }));
   const rejected = await secondFrames.next();
   assert.equal(rejected.id, 99);
@@ -174,6 +181,7 @@ test("second native host reports profile conflict and preserves active endpoint/
   const f = fixture(t), first = f.start();
   const endpoint = await f.endpoint(), inode = fs.statSync(endpoint).ino;
   const socket = await f.connect(endpoint), replies = frames(socket);
+  claim(socket);
   socket.write(encodeFrame({ id: 1, method: "DSH.hello" }));
   const request = await first.output.next();
   const second = f.start();
@@ -204,6 +212,7 @@ test("SIGKILL stale endpoint is ignored without unlink and a new host can serve"
   assert.equal(fs.statSync(stale).isSocket(), true);
   const second = f.start(), endpoint = await f.endpoint([stale]);
   const socket = await f.connect(endpoint);
+  claim(socket);
   socket.write(encodeFrame({ id: 42, method: "DSH.hello" }));
   assert.equal((await second.output.next()).method, "DSH.hello");
   assert.equal(fs.existsSync(stale), true);
