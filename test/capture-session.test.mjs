@@ -23,7 +23,7 @@ function browser({ deferCreate = false } = {}) {
   function emit(name, value) { for (const fn of handlers[name] || []) fn(value); }
   const source = readFileSync(new URL("../lib/browser.js", import.meta.url), "utf8")
     .replace(/^import[\s\S]*?;\n/gm, "").replace(/^export /gm, "")
-    + "\nglobalThis.api = { openCaptureSession, exclusive, pages };";
+    + "\nglobalThis.api = { openCaptureSession, exclusive, ensureBridge, pages };";
   const context = {
     currentOwner: () => owner, connectBridge: async () => ws,
     randomUUID: () => "fixture-id", setTimeout, clearTimeout, AbortController, AbortSignal,
@@ -35,7 +35,9 @@ function browser({ deferCreate = false } = {}) {
 
 test("capture commands retain an isolated owner when caller context changes", async () => {
   const api = browser();
-  const conversation = { targetId: "conversation-tab" };
+  // A cached conversation page belongs to an already established transport.
+  const cdp = await api.exclusive(active => api.ensureBridge(active));
+  const conversation = { targetId: "conversation-tab", cdp };
   api.pages.set("conversation-a", conversation);
   const session = await api.openCaptureSession();
   api.setOwner("conversation-b");

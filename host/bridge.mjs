@@ -19,8 +19,8 @@ let ready = false;
 let client = null;
 let nextRequest = 0;
 const pending = new Map();
-// Set by the first path-checked DSH.auth. Kept only in this process.
-// A later connection must present the same token and still pass the path check.
+// Bind the token only while an admitted controller owns the connection.
+// An auth-only probe must not pin a token across DSH process restarts.
 let sessionToken = null;
 const TOKEN_RE = /^[0-9a-f]{64}$/i;
 const ALLOW_NODE = process.env.DSH_CHROME_ALLOW_NODE_PEER === "1";
@@ -133,17 +133,19 @@ const server = net.createServer((socket) => {
     return;
   }
   let authed = false;
+  let candidateToken = null;
   // Discovery probes do not claim the single controller slot. Only a valid
   // request can claim it, and another controller receives an explicit error.
   const admission = setTimeout(() => socket.destroy(), 5000);
   const fromPlugin = createFrameParser((message) => {
     if (!authed) {
       const token = typeof message?.token === "string" ? message.token : "";
-      if (message?.method !== "DSH.auth" || !TOKEN_RE.test(token) || (sessionToken && !sameToken(token, sessionToken))) {
+      if (message?.method !== "DSH.auth" || !TOKEN_RE.test(token)
+        || (client && !client.destroyed && sessionToken && !sameToken(token, sessionToken))) {
         socket.destroy();
         return;
       }
-      if (!sessionToken) sessionToken = token.toLowerCase();
+      candidateToken = token.toLowerCase();
       authed = true;
       return;
     }
@@ -166,6 +168,7 @@ const server = net.createServer((socket) => {
     }
     clearTimeout(admission);
     client = socket;
+    sessionToken = candidateToken;
     const id = `${epoch}:${++nextRequest}`;
     const timer = setTimeout(() => pending.delete(id), 60_000);
     try {
@@ -187,7 +190,10 @@ const server = net.createServer((socket) => {
   socket.on("close", () => {
     clearTimeout(admission);
     forget(socket);
-    if (client === socket) client = null;
+    if (client === socket) {
+      client = null;
+      sessionToken = null;
+    }
   });
   socket.on("error", () => {});
 });

@@ -32,7 +32,9 @@ test("unknown requested target fails rather than silently creating a different t
 
 test("failed close remains a visible failure and keeps retryable state", async () => {
   const api = browser();
-  api.pages.set("owner-a", { cdp: { closed: false, send: async () => { throw new Error("bridge offline"); } } });
+  const cdp = { closed: false, send: async () => { throw new Error("bridge offline"); } };
+  api.setBridge(cdp);
+  api.pages.set("owner-a", { cdp });
   await assert.rejects(api.shutdown(), /bridge offline/);
   assert.equal(api.pages.has("owner-a"), true);
 });

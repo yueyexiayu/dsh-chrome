@@ -33,6 +33,7 @@ DeepSeek Harness 桌面插件。通过本机 Chrome 扩展，在**当前 Chrome*
 - 每个对话单独一个折叠标签组，标题是 `DSH` 加会话 id 末 6 位，只用于展示。完整会话归属单独记录，不会因标题相同复用另一个对话的标签，也不会调用 `Page.bringToFront`
 - 只操作本对话标签组里的标签，不列出、不切换你正在看的其他标签
 - `chrome_close` 只关掉本对话的标签组，不退出 Chrome，也不关其他对话的组
+- `chrome_browsers` 的 list 执行真实扩展握手和探活，不创建、不发现标签；成功才报告 connected，连接、协议、超时和取消错误直接可见。启动后尚未操作浏览器不再被误报为断线。与普通操作和采集串行复用同一连接；断线会清除所有对话的旧 transport/ref 缓存，不关闭真实标签，恢复后重新认领各自归属的标签
 - `chrome_resize` 不改窗口大小，避免 macOS 把 Chrome 激活
 - `chrome_screenshot` 把 PNG 落盘，并在确认当前模型支持图片时通过正式附件引用交回模型；配合 `zhanshi` 可在本轮对话里预览。插件不包装或改写全局 LLM 服务
 - 元素引用（ref）来自最近一次 `chrome_snapshot` / `chrome_query` / `chrome_find` / `chrome_a11y`；这几次调用都会重新编号
@@ -63,7 +64,8 @@ DeepSeek Harness 桌面插件。通过本机 Chrome 扩展，在**当前 Chrome*
 
 ## 桥接冲突与旧版本迁移
 
-- 同一 DSH_HOME 同时只支持一个 Chrome profile 的扩展通信主机和一个 DSH 控制连接。第二个连接明确返回忙碌；第二个 profile 显示冲突，不踢掉已有连接、不自动切换 profile。请在其它 profile 禁用扩展，再在目标 profile 重新加载。
+- 同一 DSH_HOME 同时只支持一个 Chrome profile 的扩展通信主机和一个 DSH 控制连接。活跃控制器存在时，异 token 连接在认证阶段拒绝，同 token 的第二个连接返回忙碌；第二个 profile 显示冲突，不踢掉已有连接、不自动切换 profile。请在其它 profile 禁用扩展，再在目标 profile 重新加载。
+- 控制 token 仅绑定已接纳的控制连接。该连接退出后，即使 Native Host 仍存活，新 DSH 进程也可用新 token 重新握手；只有 auth 的探测不占位，不会永久钉住旧 token。活跃控制连接仍不能被第二个连接踢掉
 - 每个主机使用独立的随机 socket，退出只清理自己创建的端点。崩溃留下的随机失效端点会被忽略，不自动删除其它进程的文件。
 - 旧版固定端点 `$DSH_HOME/cache/dsh-chrome.sock` 不能安全探活：连接它就可能挤掉旧版控制器。新版发现它会明确拒绝连接，不自动删除。升级时完全退出 Chrome 和 DSH，确认旧通信主机已退出后，才可删除这个旧端点（默认 `~/.dsh/cache/dsh-chrome.sock`；不要删除整个 cache），然后重新打开并加载新版扩展。此清理只用于旧固定端点，不适用于新的随机端点。
 - 冲突状态跨扩展 service worker 重启保留；解决后通过工具栏操作、重新加载扩展或下一次 Chrome 启动显式重试，不持续偷偷抢占连接。
