@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,17 +11,11 @@ import { EXTENSION_ID, HOST_NAME, nativeHostManifest, pluginRoot, socketPaths } 
 import { GROUP_TITLE, canPick, groupTitle, ignoreFocusMethod, tabCreateProperties, windowCreateProperties } from "../extension/policy.js";
 import { contextKey } from "../lib/owner.js";
 import { JPEG } from "./fixtures/jpeg.mjs";
+import { nativeFixtureEnv, requireInstalledRuntime } from "./fixtures/native-runtime.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TOKEN = "ab".repeat(32);
 const OTHER_TOKEN = "cd".repeat(32);
-
-function hostEnv(home, allowNode = true) {
-  const env = { ...process.env, DSH_HOME: home };
-  if (allowNode) env.DSH_CHROME_ALLOW_NODE_PEER = "1";
-  else delete env.DSH_CHROME_ALLOW_NODE_PEER;
-  return env;
-}
 
 function auth(socket, token = TOKEN) {
   socket.write(encodeFrame({ method: "DSH.auth", token }));
@@ -54,6 +48,7 @@ test("native host manifest is bound to this extension", () => {
   assert.equal(manifest.path, path.join(pluginRoot(), "host", "dsh-chrome-host"));
   assert.equal(JSON.stringify(manifest).includes("DSH_CHROME_ALLOW_NODE_PEER"), false);
   assert.doesNotMatch(readFileSync(path.join(root, "host", "dsh-chrome-host"), "utf8"), /DSH_CHROME_ALLOW_NODE_PEER/);
+  assert.doesNotMatch(readFileSync(path.join(root, "host", "bridge.mjs"), "utf8"), /DSH_CHROME_ALLOW_NODE_PEER|ALLOW_NODE/);
   const background = readFileSync(path.join(root, "extension", "background.js"), "utf8");
   assert.doesNotMatch(background, /DSH\.auth/);
 });
@@ -68,10 +63,11 @@ test("conversations get separate tab groups", () => {
 });
 
 test("host stores a page mark without forwarding it to the tool socket", async () => {
+  requireInstalledRuntime();
   const home = mkdtempSync(path.join(tmpdir(), "dsh-chrome-"));
-  const child = spawn(path.join(root, "host", "dsh-chrome-host"), {
+  const child = spawn(process.execPath, [path.join(root, "host", "bridge.mjs")], {
     cwd: root,
-    env: hostEnv(home),
+    env: nativeFixtureEnv(home),
     stdio: ["pipe", "pipe", "pipe"],
   });
   const socket = await waitForConnect(home);
@@ -134,10 +130,11 @@ test("extension source does not activate a tab or window", () => {
 });
 
 test("host relays socket commands to the extension and replies back", async () => {
+  requireInstalledRuntime();
   const home = mkdtempSync(path.join(tmpdir(), "dsh-chrome-"));
-  const child = spawn(path.join(root, "host", "dsh-chrome-host"), {
+  const child = spawn(process.execPath, [path.join(root, "host", "bridge.mjs")], {
     cwd: root,
-    env: hostEnv(home),
+    env: nativeFixtureEnv(home),
     stdio: ["pipe", "pipe", "pipe"],
   });
   const socket = await waitForConnect(home);
@@ -158,10 +155,11 @@ test("host relays socket commands to the extension and replies back", async () =
 });
 
 test("hello without a first-frame token is not forwarded", async () => {
+  requireInstalledRuntime();
   const home = mkdtempSync(path.join(tmpdir(), "dsh-chrome-"));
-  const child = spawn(path.join(root, "host", "dsh-chrome-host"), {
+  const child = spawn(process.execPath, [path.join(root, "host", "bridge.mjs")], {
     cwd: root,
-    env: hostEnv(home),
+    env: nativeFixtureEnv(home),
     stdio: ["pipe", "pipe", "pipe"],
   });
   const socket = await waitForConnect(home);
@@ -176,31 +174,67 @@ test("hello without a first-frame token is not forwarded", async () => {
   }
 });
 
-test("a node peer is rejected unless the test host allows it", async () => {
+test("an ordinary Node peer is always rejected by the genuine production gate", { timeout: 10000 }, async () => {
+  requireInstalledRuntime();
   const home = mkdtempSync(path.join(tmpdir(), "dsh-chrome-"));
-  const child = spawn(path.join(root, "host", "dsh-chrome-host"), {
-    cwd: root,
-    env: hostEnv(home, false),
-    stdio: ["pipe", "pipe", "pipe"],
+  const child = spawn(process.execPath, [path.join(root, "host", "bridge.mjs")], {
+    cwd: root, env: nativeFixtureEnv(home), stdio: ["pipe", "pipe", "pipe"],
   });
-  const socket = await waitForConnect(home);
+  const fromHost = collect(child.stdout);
+  const source = `
+    import net from 'node:net';
+    import { socketPaths } from ${JSON.stringify(new URL('../lib/install.js', import.meta.url).href)};
+    import { encodeFrame } from ${JSON.stringify(new URL('../lib/frame.js', import.meta.url).href)};
+    const waitForConnect = ${waitForConnect.toString()};
+    const socket = await waitForConnect(process.argv[1]);
+    socket.removeAllListeners('error');
+    let received = false;
+    const timer = setTimeout(() => { process.exitCode = 1; socket.destroy(); }, 1500);
+    socket.on('data', () => { received = true; });
+    socket.on('error', () => {});
+    socket.once('close', () => {
+      clearTimeout(timer);
+      if (received) process.exitCode = 2;
+      else if (!process.exitCode) process.stdout.write('NODE_PEER_REJECTED\\n');
+    });
+    socket.write(encodeFrame({ method: 'DSH.auth', token: ${JSON.stringify(TOKEN)} }));
+    socket.write(encodeFrame({ id: 7, method: 'DSH.hello' }));
+  `;
+  // This child is deliberately ordinary Node. It must be denied, never admitted
+  // by an environment switch or by a fake App-shaped executable path.
+  const denied = spawn("/usr/local/bin/node", ["--input-type=module", "-e", source, home], {
+    env: nativeFixtureEnv(home), stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "", errors = "";
+  denied.stdout.on("data", data => { output += data; });
+  denied.stderr.on("data", data => { errors += data; });
   try {
-    const fromHost = collect(child.stdout);
-    auth(socket);
-    socket.write(encodeFrame({ id: 7, method: "DSH.hello" }));
+    const status = await new Promise((resolve, reject) => {
+      denied.once("error", reject);
+      denied.once("exit", (code, signal) => resolve({ code, signal }));
+    });
+    assert.deepEqual(status, { code: 0, signal: null }, errors);
+    assert.equal(output, "NODE_PEER_REJECTED\n");
     await expectNoForward(fromHost);
-    await waitClosed(socket);
   } finally {
-    socket.destroy();
-    child.kill();
+    for (const owned of [denied, child]) {
+      if (owned.exitCode !== null || owned.signalCode !== null) continue;
+      const exited = new Promise(resolve => owned.once("exit", resolve));
+      owned.kill();
+      await exited;
+    }
+    assert.equal(path.dirname(home), tmpdir().replace(/\/$/, ""));
+    assert.match(path.basename(home), /^dsh-chrome-/);
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
 test("a second connection must present the token set by the first", async () => {
+  requireInstalledRuntime();
   const home = mkdtempSync(path.join(tmpdir(), "dsh-chrome-"));
-  const child = spawn(path.join(root, "host", "dsh-chrome-host"), {
+  const child = spawn(process.execPath, [path.join(root, "host", "bridge.mjs")], {
     cwd: root,
-    env: hostEnv(home),
+    env: nativeFixtureEnv(home),
     stdio: ["pipe", "pipe", "pipe"],
   });
   const first = await waitForConnect(home);
@@ -222,6 +256,7 @@ test("a second connection must present the token set by the first", async () => 
 });
 
 test("peerpath reports the connected executable without closing the parent socket", async () => {
+  requireInstalledRuntime();
   const dir = mkdtempSync(path.join(tmpdir(), "dsh-peer-"));
   const sock = path.join(dir, "s");
   const server = net.createServer();
@@ -234,7 +269,7 @@ test("peerpath reports the connected executable without closing the parent socke
     const result = spawnSync(path.join(root, "host", "peerpath"), [], { stdio: ["ignore", "pipe", "pipe", duped] });
     closeSync(duped);
     assert.equal(result.status, 0);
-    assert.equal(path.basename(String(result.stdout).trim()), "node");
+    assert.equal(realpathSync(String(result.stdout).trim()), realpathSync(process.execPath));
     socket.write("still-open");
     const got = await new Promise((resolve) => client.once("data", resolve));
     assert.equal(got.toString(), "still-open");
@@ -258,8 +293,8 @@ function expectNoForward(fromHost) {
 
 function waitClosed(socket) {
   if (socket.destroyed) return Promise.resolve();
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, 500);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("expected the rejected peer socket to actually close")), 500);
     socket.once("close", () => {
       clearTimeout(timer);
       resolve();

@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 import { createFrameParser, encodeFrame } from "../lib/frame.js";
 import { saveMark } from "../lib/marks.js";
 import { socketPaths } from "../lib/install.js";
+import { peerAllowed } from "./peer-identity.mjs";
 
 const home = process.env.DSH_HOME || path.join(os.homedir(), ".dsh");
 const epoch = randomBytes(16).toString("hex");
@@ -23,7 +24,6 @@ const pending = new Map();
 // An auth-only probe must not pin a token across DSH process restarts.
 let sessionToken = null;
 const TOKEN_RE = /^[0-9a-f]{64}$/i;
-const ALLOW_NODE = process.env.DSH_CHROME_ALLOW_NODE_PEER === "1";
 
 function sameToken(left, right) {
   const a = String(left || "").toLowerCase();
@@ -55,7 +55,11 @@ function peerExecutable(socket) {
       timeout: 1000,
     });
     if (!result || result.status !== 0) return "";
-    return String(result.stdout || "").replace(/\0/g, "").trim();
+    const output = String(result.stdout || "");
+    // peerpath appends one newline after proc_pidpath's bytes. Remove only
+    // that delimiter and an optional C terminator, never filename whitespace.
+    if (!output.endsWith("\n")) return "";
+    return output.slice(0, -1).replace(/\0$/, "");
   } catch {
     return "";
   } finally {
@@ -63,14 +67,6 @@ function peerExecutable(socket) {
       try { fs.closeSync(duped); } catch { /* the original socket stays open */ }
     }
   }
-}
-
-function peerAllowed(exe) {
-  if (!exe || exe.includes("\0")) return false;
-  if (exe.includes("/DeepSeek Harness.app/")) return true;
-  // Test hosts set this when they spawn. Chrome's native-host launch does not.
-  if (ALLOW_NODE && path.basename(exe) === "node") return true;
-  return false;
 }
 
 function forget(socket) {

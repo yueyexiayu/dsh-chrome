@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createFrameParser, encodeFrame } from "../lib/frame.js";
 import { socketPaths } from "../lib/install.js";
+import { nativeFixtureEnv, requireInstalledRuntime } from "./fixtures/native-runtime.mjs";
 
 const hostPath = fileURLToPath(new URL("../host/bridge.mjs", import.meta.url));
 const firstToken = "ab".repeat(32);
@@ -25,9 +26,10 @@ function frames(stream) {
   } };
 }
 async function fixture(t) {
-  const home = await mkdtemp(path.join(os.tmpdir(), "chrome-controller-restart-"));
+  requireInstalledRuntime();
+  const home = await mkdtemp(path.join(os.tmpdir(), "chrome-restart-"));
   const child = spawn(process.execPath, [hostPath], {
-    env: { ...process.env, DSH_HOME: home, DSH_CHROME_ALLOW_NODE_PEER: "1" }, stdio: ["pipe", "pipe", "pipe"],
+    env: nativeFixtureEnv(home), stdio: ["pipe", "pipe", "pipe"],
   });
   let errors = "";
   child.stderr.on("data", data => { errors += data; });
@@ -40,20 +42,33 @@ async function fixture(t) {
       child.kill(); await exit;
     }
     assert.equal(path.dirname(home), os.tmpdir().replace(/\/$/, ""));
-    assert.match(path.basename(home), /^chrome-controller-restart-/);
+    assert.match(path.basename(home), /^chrome-restart-/);
     await rm(home, { recursive: true, force: true });
   });
-  let endpoint;
-  const deadline = Date.now() + 2000;
-  while (Date.now() < deadline && !endpoint) { endpoint = socketPaths(home)[0]; if (!endpoint) await delay(5); }
-  assert.ok(endpoint, `isolated native endpoint missing: ${errors}`);
   async function connect(token) {
-    const socket = net.connect(endpoint);
-    sockets.push(socket); socket.on("error", () => {});
-    await new Promise((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
-    const replies = frames(socket);
-    socket.write(encodeFrame({ method: "DSH.auth", token }));
-    return { socket, replies, request(id, method = "DSH.hello") { socket.write(encodeFrame({ id, method })); } };
+    const deadline = Date.now() + 2000;
+    let lastError;
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`isolated native host exited before accepting a connection: ${errors}`);
+      const endpoint = socketPaths(home)[0];
+      if (!endpoint) { await delay(5); continue; }
+      const socket = net.connect(endpoint);
+      sockets.push(socket); socket.on("error", () => {});
+      try {
+        // A pathname is not listening readiness. Retry only native bind/startup races.
+        await new Promise((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+      } catch (error) {
+        socket.destroy();
+        if (!["ENOENT", "ECONNREFUSED"].includes(error.code)) throw error;
+        lastError = error;
+        await delay(5);
+        continue;
+      }
+      const replies = frames(socket);
+      socket.write(encodeFrame({ method: "DSH.auth", token }));
+      return { socket, replies, request(id, method = "DSH.hello") { socket.write(encodeFrame({ id, method })); } };
+    }
+    throw new Error(`isolated native endpoint did not accept a connection within 2 seconds: ${errors}`, { cause: lastError });
   }
   async function close(controller) {
     if (controller.socket.destroyed) return;

@@ -72,12 +72,26 @@ DeepSeek Harness 桌面插件。通过本机 Chrome 扩展，在**当前 Chrome*
 
 ## 开发
 
+普通 Node 的纯源码 / VM / 文件系统套件（不会连接真实 socket、启动 Native Host 或 Chrome）：
+
 ```bash
 pnpm install --frozen-lockfile
-for file in lib/*.js extension/*.js host/*.mjs; do
-  node --check "$file" || exit 1
+/usr/local/bin/node test/run-pure.mjs
+for file in lib/*.js extension/*.js host/*.mjs test/*.mjs test/fixtures/*.mjs; do
+  /usr/local/bin/node --check "$file" || exit 1
 done
-node --test test/*.test.mjs
 ```
 
-测试包括真实隔离的 Unix socket / Native Host 进程、握手错误与进程竞争、iframe ref 路由、密码脱敏、文件策略、JPEG 真解码、标注持久化和可信确认页来源检查。VM / HTTP 浏览器夹具不等于已安装扩展端到端验收；后者必须在重载扩展并完整重启 DSH 后执行。
+完整 protocol / Native Host 套件需要先独立确认现场 installed App 支持 `RunAsNode`，并取得该批本机进程验收授权，再在本插件目录执行。先从当前进程的可执行路径定位运行中的 DSH，不依赖旧固定应用名；多份不同安装并行时先明确选择目标：
+
+```bash
+DSH_EXECUTABLE="$(/bin/ps -axo comm= | /usr/bin/awk '/^\/Applications\/DeepSeek Harness( [^/]+)?\.app\/Contents\/MacOS\/DeepSeek Harness$/ { if (!seen[$0]++) print }')"
+test -n "$DSH_EXECUTABLE" && test -x "$DSH_EXECUTABLE" || exit 1
+ELECTRON_RUN_AS_NODE=1 "$DSH_EXECUTABLE" --test test/*.test.mjs
+```
+
+完整套件使用真正 installed App 的 Node 环境作为合法控制 peer；启动前检查真实 `process.execPath`、Electron Node 环境与 `ELECTRON_RUN_AS_NODE=1`，条件不足明确失败，不 skip、不改名 Node、不使用 production 测试豁免，不为让默认 `npm test` 变绿自动启动 GUI。Native fixtures 只用当前用户所有、权限私有、直接位于系统临时目录的 mkdtemp `DSH_HOME`、自有 Unix sockets 和模拟 Native frames，不写真实 NativeMessagingHosts 注册或用户 cache，也不接实际 Chrome。负例会启动普通 Node 及伪造 DSH `argv0` 的普通 Node，验证两者均被真实生产 gate 拒绝；reconnect 的 expiry 测试仅 VM-mock App-shaped peer 返回，不是 OS 身份证据。没有普通 Node peer 环境开关。
+
+0.2.2 的生产 gate 继续通过 `LOCAL_PEERPID` / `proc_pidpath` 读取真实 socket 对端，只允许 `/Applications/DeepSeek Harness[ <合法 SemVer>].app/Contents/MacOS/DeepSeek Harness`，并要求 realpath 与原路径一致。非 DSH 应用、Helper、Node、嵌套伪路径和 symlink 逃逸均拒绝；这仍是 OS 可执行路径信任模型，不是额外的代码签名认证。认证、protocol 2 和 owner 隔离不变。现场带版本名 App 的重载、原生集成与当前 Chrome 运行态证据见 [原生桥接验收记录](docs/native-bridge-verification.md)。
+
+测试涵盖握手错误与进程竞争、owner close / 取消 / late-create / pending evaluate 排空、B 隔离、iframe ref 路由、密码脱敏、文件策略、JPEG 真解码、标注持久化和可信确认页来源检查。VM 与私有 protocol fixtures 都不等于已安装扩展端到端验收；后者必须重载扩展并完整重启 DSH，独立确认实际版本后执行。

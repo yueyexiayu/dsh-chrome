@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { createFrameParser, encodeFrame } from "../lib/frame.js";
 import { socketPaths } from "../lib/install.js";
 import { JPEG } from "./fixtures/jpeg.mjs";
+import { nativeFixtureEnv, requireInstalledRuntime } from "./fixtures/native-runtime.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TOKEN = "ab".repeat(32);
@@ -51,7 +52,7 @@ async function connect(home) {
 
 function host(t, home) {
   const child = spawn(process.execPath, [path.join(root, "host/bridge.mjs")], {
-    env: { ...process.env, DSH_HOME: home, DSH_CHROME_ALLOW_NODE_PEER: "1" }, stdio: ["pipe", "pipe", "pipe"],
+    env: nativeFixtureEnv(home), stdio: ["pipe", "pipe", "pipe"],
   });
   t.after(async () => {
     const exited = new Promise((resolve) => child.once("exit", resolve));
@@ -63,6 +64,7 @@ function host(t, home) {
 }
 
 test("a late response from a disconnected client cannot resolve a new client's reused id", { timeout: 10000 }, async (t) => {
+  requireInstalledRuntime();
   const home = mkdtempSync(path.join(tmpdir(), "chrome-reconnect-"));
   const h = host(t, home);
   const old = await connect(h.home);
@@ -91,6 +93,7 @@ test("a late response from a disconnected client cannot resolve a new client's r
 });
 
 test("the host returns an explicit save error with the original mark request id", { timeout: 10000 }, async (t) => {
+  requireInstalledRuntime();
   const home = mkdtempSync(path.join(tmpdir(), "chrome-save-error-"));
   mkdirSync(path.join(home, "cache"));
   writeFileSync(path.join(home, "cache/dsh-chrome-marks"), "blocked-directory");
@@ -112,15 +115,16 @@ test("unanswered native requests expire after 60 seconds and their late replies 
   let accept;
   let nextTimer = 0;
   const context = vm.createContext({
-    fs: { mkdirSync() {}, unlinkSync() {}, chmodSync() {}, lstatSync() { return { dev: 1, ino: 1, isSocket: () => true }; } },
+    fs: { mkdirSync() {}, unlinkSync() {}, chmodSync() {}, realpathSync(exe) { return exe; }, lstatSync() { return { dev: 1, ino: 1, isSocket: () => true }; } },
     socketPaths() { return []; },
     net: { createServer(fn) { accept = fn; return { listen(_sock, fn) { fn(); }, on() {} }; } },
     os: { homedir() { return "/mock-home"; } }, path,
     randomBytes() { return Buffer.alloc(16); }, createFrameParser, encodeFrame,
-    spawnSync() { return { status: 0, stdout: Buffer.from("/usr/local/bin/node\n") }; },
+    // VM-only admission result; this is not an OS-observed peer identity.
+    spawnSync() { return { status: 0, stdout: Buffer.from("/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness\n") }; },
     saveMark() { throw new Error("unexpected mark write"); },
     process: {
-      env: { DSH_HOME: "/mock-home", DSH_CHROME_ALLOW_NODE_PEER: "1" }, argv: ["/usr/local/bin/node", "/mock/bridge.mjs"], on() {},
+      env: { DSH_HOME: "/mock-home" }, argv: ["/usr/local/bin/node", "/mock/bridge.mjs"], on() {},
       stdin: { on(name, fn) { stdinListeners[name] = fn; } },
       stdout: { write(frame) { createFrameParser((message) => nativeFrames.push(message)).push(frame); } },
       stderr: { write(message) { throw new Error(message); } },
@@ -129,8 +133,10 @@ test("unanswered native requests expire after 60 seconds and their late replies 
     setTimeout(fn, ms) { const id = ++nextTimer; timers.set(id, { fn, ms }); return id; },
     clearTimeout(id) { timers.delete(id); },
   });
+  const identitySource = readFileSync(path.join(root, "host/peer-identity.mjs"), "utf8")
+    .replace(/^import .*;\n/gm, "").replace(/^export /gm, "");
   const source = readFileSync(path.join(root, "host/bridge.mjs"), "utf8").replace(/^import .*;\n/gm, "");
-  vm.runInContext(`${source}\nglobalThis.pendingCount = () => pending.size;`, context);
+  vm.runInContext(`${identitySource}\n${source}\nglobalThis.pendingCount = () => pending.size;`, context);
   await Promise.resolve();
   const handlers = {};
   const socket = {

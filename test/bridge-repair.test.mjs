@@ -9,6 +9,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createFrameParser, encodeFrame } from "../lib/frame.js";
 import { socketPaths } from "../lib/install.js";
+import { nativeFixtureEnv, requireInstalledRuntime } from "./fixtures/native-runtime.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TOKEN = "ab".repeat(32);
@@ -118,6 +119,7 @@ function frames(stream) {
   } };
 }
 function fixture(t) {
+  requireInstalledRuntime();
   const home = fs.mkdtempSync("/tmp/chrome-repair-");
   const children = [], sockets = [];
   t.after(async () => {
@@ -134,7 +136,7 @@ function fixture(t) {
   });
   function start() {
     const child = spawn(process.execPath, [path.join(root, "host/bridge.mjs")], {
-      env: { ...process.env, DSH_HOME: home, DSH_CHROME_ALLOW_NODE_PEER: "1" }, stdio: ["pipe", "pipe", "pipe"],
+      env: nativeFixtureEnv(home), stdio: ["pipe", "pipe", "pipe"],
     });
     const host = { child, output: frames(child.stdout), errors: "" };
     child.stderr.on("data", chunk => { host.errors += chunk; });
