@@ -25,14 +25,6 @@ export function tabCreateProperties(windowId, url) {
   };
 }
 
-export function windowCreateProperties(url) {
-  return {
-    url: url || "about:blank",
-    focused: false,
-    type: "normal",
-  };
-}
-
 export function canPick(url) {
   return /^https?:\/\//i.test(String(url || ""));
 }

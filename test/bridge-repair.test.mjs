@@ -99,6 +99,20 @@ test("connect is bounded and abortable even when net.connect never emits", async
   }
 });
 
+test("only never-connected discovery is unavailable; a connected-then-closed bridge is not an anonymous fallback reason", async () => {
+  const timers = (fn, ms) => setTimeout(fn, Math.min(ms, 20));
+  await assert.rejects(clientApi({ setTimeout: timers }).waitForSocket(), { code: "CHROME_EXTENSION_UNAVAILABLE" });
+  const sockets = [];
+  const api = clientApi({ setTimeout: timers, socketPaths: () => ["/mock/dsh-c-12345678"], net: { connect() {
+    const socket = new Socket(); sockets.push(socket);
+    queueMicrotask(() => { socket.emit("connect"); socket.destroy(); });
+    return socket;
+  } } });
+  await assert.rejects(api.waitForSocket(), { code: "CHROME_BRIDGE_CONNECTION_CLOSED" });
+  assert.ok(sockets.length > 0);
+  assert.ok(sockets.every(socket => socket.destroyed));
+});
+
 test("legacy discovery refuses without connecting to or evicting the old host", async () => {
   let connections = 0;
   const api = clientApi({ socketPaths: () => ["/mock/dsh-chrome.sock"], net: { connect() { connections++; } } });

@@ -22,7 +22,14 @@ function worker(shared = { tabs: new Map(), stored: {}, next: 1, group: 1 }) {
       async set(value) { if (shared.beforeSet) await shared.beforeSet(value); Object.assign(shared.stored, structuredClone(value)); },
       async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) delete shared.stored[key]; },
     } },
-    windows: { async getAll() { return [{ id: 1, focused: true }]; }, async get(id) { return { id }; } },
+    windows: {
+      async getAll() { return shared.windows ?? [{ id: 1, focused: true }]; },
+      async get(id) { return { id }; },
+      async create(props) {
+        (shared.createdWindows ??= []).push(props);
+        return { id: 2, tabs: [await chrome.tabs.create({ windowId: 2, url: props.url })] };
+      },
+    },
     tabs: {
       async create(props) { const tab = { ...props, id: shared.next++, groupId: -1 }; shared.tabs.set(tab.id, tab); return { ...tab }; },
       async get(id) { if (!shared.tabs.has(id)) throw new Error("No tab with id"); return { ...shared.tabs.get(id) }; },
@@ -39,7 +46,10 @@ function worker(shared = { tabs: new Map(), stored: {}, next: 1, group: 1 }) {
       async sendCommand(source, method, params) { commands.push({ source, method, params }); return {}; },
       onEvent: event("debuggerEvent"), onDetach: event("detach"),
     },
-    downloads: { onCreated: event("downloadCreated"), onChanged: event("downloadChanged") },
+    downloads: {
+      async search() { return shared.downloadItems ?? []; },
+      onCreated: event("downloadCreated"), onChanged: event("downloadChanged"),
+    },
     action: { onClicked: event("click"), async setBadgeText({ text }) { shared.badge = text; }, async setBadgeBackgroundColor() {}, async setTitle({ title }) { shared.title = title; } },
     runtime: {
       id: "fixture-extension", getURL(file) { return `chrome-extension://fixture-extension/${file}`; },
@@ -56,6 +66,7 @@ function worker(shared = { tabs: new Map(), stored: {}, next: 1, group: 1 }) {
   });
   const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "");
   vm.runInContext(`${source}\nglobalThis.api = { handle, postMark, prepareReview, handleReview, retryConnection };`, context);
+  context.api.chrome = chrome; // Fault injection only into the test's mocked Chrome APIs.
   return { shared, events, sent, commands, timers, native, ...context.api };
 }
 
@@ -119,6 +130,31 @@ test("new owned tabs do not join a group that now includes a user tab", async ()
   assert.notEqual(w.shared.tabs.get(Number(second.targetId.slice(4))).groupId, first.groupId);
   await w.handle(command("Browser.close", "alpha"));
   assert.deepEqual([...w.shared.tabs.keys()], [99]);
+});
+
+test("missing normal window never creates a GUI window as a background-tab fallback", async () => {
+  const w = worker();
+  w.shared.windows = [];
+  await assert.rejects(w.handle(command("Target.createTarget", "alpha")), { code: "CHROME_NORMAL_WINDOW_REQUIRED" });
+  assert.deepEqual(w.shared.createdWindows ?? [], []);
+  assert.equal(w.shared.tabs.size, 0);
+});
+
+test("extension rejects independent download and browser context capabilities explicitly", async () => {
+  const w = worker();
+  for (const method of ["Browser.setDownloadBehavior", "Target.createBrowserContext", "Target.disposeBrowserContext"]) {
+    await assert.rejects(w.handle(command(method, "alpha", { behavior: "allow", downloadPath: "/private/synthetic-only" })), { code: "UNSUPPORTED_BROWSER_CAPABILITY" });
+  }
+  await assert.rejects(w.handle(command("Target.createTarget", "alpha", { browserContextId: "synthetic-context" })), { code: "UNSUPPORTED_BROWSER_CAPABILITY" });
+  assert.equal(w.shared.tabs.size, 0);
+});
+
+test("download inventory without proved owner tracking fails instead of reporting an empty list", async () => {
+  const w = worker();
+  await w.handle(command("Target.createTarget", "alpha"));
+  // Real DownloadItem does not contain tabId. An item must not be silently lost.
+  w.shared.downloadItems = [{ id: 1, filename: "synthetic.txt", state: "complete", url: "http://127.0.0.1/synthetic.txt" }];
+  await assert.rejects(w.handle(command("Browser.getDownloadItems", "alpha")), { code: "UNSUPPORTED_BROWSER_CAPABILITY" });
 });
 
 test("hello declares the protocol with strict ownership and acknowledged marks", async () => {
@@ -437,4 +473,304 @@ test("bridge conflict is visible and prevents automatic retries across worker re
   assert.equal(fresh.events.nativeMessage, undefined);
   await fresh.retryConnection();
   assert.equal(typeof fresh.events.nativeMessage, "function");
+});
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const turn = () => new Promise(resolve => setImmediate(resolve));
+
+for (const method of ["Page.navigate", "Page.captureScreenshot", "Runtime.evaluate"]) {
+  test(`T5 close drains actual ${method} settlement and leaves owner B usable`, async () => {
+    const w = worker();
+    const a = await w.handle(command("Target.createTarget", "a"));
+    const b = await w.handle(command("Target.createTarget", "b"));
+    await w.handle(command("Target.attachToTarget", "a", a));
+    await w.handle(command("Target.attachToTarget", "b", b));
+    const dispatched = deferred(), release = deferred();
+    w.chrome.debugger.sendCommand = async (source) => {
+      if (source.tabId === Number(a.targetId.slice(4))) { dispatched.resolve(); await release.promise; }
+      return {};
+    };
+    const running = w.handle(command(method, "a", {}, a.targetId));
+    await dispatched.promise;
+    let acknowledged = false;
+    const closing = w.handle(command("Browser.close", "a")).then(() => { acknowledged = true; });
+    await turn();
+    const prematureAck = acknowledged;
+    await w.handle(command("Runtime.evaluate", "b", {}, b.targetId));
+    release.resolve();
+    await Promise.all([running, closing]);
+    assert.equal(prematureAck, false, "close is not settlement while the real Chrome command is still pending");
+    assert.deepEqual([...w.shared.tabs.keys()], [Number(b.targetId.slice(4))]);
+  });
+}
+
+test("T5 pre-create close rejects new A work and never creates a late target after preflight", async () => {
+  const w = worker();
+  const preflight = deferred(), release = deferred();
+  const getAll = w.chrome.windows.getAll;
+  let first = true;
+  w.chrome.windows.getAll = async (...args) => {
+    if (first) { first = false; preflight.resolve(); await release.promise; }
+    return getAll(...args);
+  };
+  const creation = w.handle(command("Target.createTarget", "a"));
+  const creationOutcome = creation.then(value => ({ value }), error => ({ error }));
+  await preflight.promise;
+  let acknowledged = false;
+  const closing = w.handle(command("Browser.close", "a")).then(() => { acknowledged = true; });
+  await turn();
+  const prematureAck = acknowledged;
+  const additional = w.handle(command("Target.createTarget", "a"));
+  const additionalOutcome = additional.then(value => ({ value }), error => ({ error }));
+  const b = await w.handle(command("Target.createTarget", "b"));
+  release.resolve();
+  const [created, extra] = await Promise.all([creationOutcome, additionalOutcome, closing]);
+  assert.equal(prematureAck, false);
+  assert.equal(created.error?.code, "CHROME_OWNER_CLOSING");
+  assert.equal(extra.error?.code, "CHROME_OWNER_CLOSING");
+  assert.deepEqual([...w.shared.tabs.keys()], [Number(b.targetId.slice(4))]);
+});
+
+test("T5 dispatched create drains before close ACK and does not remove a foreign tab", async () => {
+  const w = worker();
+  w.shared.tabs.set(999, { id: 999, windowId: 1, groupId: -1 });
+  const dispatched = deferred(), release = deferred();
+  const create = w.chrome.tabs.create;
+  w.chrome.tabs.create = async props => { dispatched.resolve(); await release.promise; return create(props); };
+  const creation = w.handle(command("Target.createTarget", "a"));
+  const creationOutcome = creation.then(value => ({ value }), error => ({ error }));
+  await dispatched.promise;
+  let acknowledged = false;
+  const closing = w.handle(command("Browser.close", "a")).then(() => { acknowledged = true; });
+  await turn();
+  const prematureAck = acknowledged;
+  release.resolve();
+  await Promise.all([creationOutcome, closing]);
+  assert.equal(prematureAck, false);
+  assert.deepEqual([...w.shared.tabs.keys()], [999]);
+});
+
+test("T5 failed grouping and failed removal retain exact durable ownership across worker restart", async () => {
+  const w = worker();
+  w.shared.tabs.set(999, { id: 999, windowId: 1, groupId: -1 });
+  w.chrome.tabs.group = async () => { throw new Error("group denied"); };
+  w.chrome.tabs.remove = async () => { throw new Error("removal denied"); };
+  await assert.rejects(w.handle(command("Target.createTarget", "a")), /removal denied/);
+  assert.equal(w.shared.tabs.size, 2);
+  const restarted = worker(w.shared);
+  await restarted.handle(command("Browser.close", "a"));
+  assert.deepEqual([...w.shared.tabs.keys()], [999], "a restart must not orphan the partially initialized actual child");
+});
+
+test("T5 undefined removal is not a settled Chrome promise or a successful close", async () => {
+  const w = worker();
+  const a = await w.handle(command("Target.createTarget", "a"));
+  const remove = w.chrome.tabs.remove;
+  w.chrome.tabs.remove = () => undefined;
+  const outcome = await w.handle(command("Browser.close", "a")).then(value => ({ value }), error => ({ error }));
+  w.chrome.tabs.remove = remove;
+  await w.handle(command("Browser.close", "a"));
+  assert.equal(outcome.error?.code, "CHROME_CLEANUP_PENDING");
+  assert.equal(w.shared.tabs.has(Number(a.targetId.slice(4))), false);
+});
+
+test("T5 failed close remains retryable and concurrent closes share actual removal", async () => {
+  const w = worker();
+  await w.handle(command("Target.createTarget", "a"));
+  const b = await w.handle(command("Target.createTarget", "b"));
+  const remove = w.chrome.tabs.remove;
+  const dispatched = deferred(), release = deferred();
+  let attempts = 0;
+  w.chrome.tabs.remove = async ids => { attempts++; dispatched.resolve(); await release.promise; return remove(ids); };
+  const one = w.handle(command("Browser.close", "a"));
+  await dispatched.promise;
+  const two = w.handle(command("Browser.close", "a"));
+  release.resolve();
+  await Promise.all([one, two]);
+  assert.equal(attempts, 1);
+  assert.deepEqual([...w.shared.tabs.keys()], [Number(b.targetId.slice(4))]);
+});
+
+test("T5 failed ordinary-owner close freezes new attachment until old detach and accepted RPC both settle", async () => {
+  const w = worker();
+  const a = await w.handle(command("Target.createTarget", "ordinary-a"));
+  const b = await w.handle(command("Target.createTarget", "ordinary-b"));
+  await w.handle(command("Target.attachToTarget", "ordinary-a", a));
+  await w.handle(command("Target.attachToTarget", "ordinary-b", b));
+  const aId = Number(a.targetId.slice(4));
+  const detach = deferred(), rpc = deferred(), dispatched = deferred(), removeAttempted = deferred();
+  let newAttaches = 0;
+  w.chrome.debugger.attach = async () => { newAttaches++; };
+  w.chrome.debugger.detach = async ({ tabId }) => { if (tabId === aId) await detach.promise; };
+  w.chrome.debugger.sendCommand = async ({ tabId }, _method, params) => {
+    if (tabId === aId && params.expression === "hold-old-rpc") { dispatched.resolve(); await rpc.promise; }
+    return {};
+  };
+  w.chrome.tabs.remove = async () => { removeAttempted.resolve(); throw new Error("forced removal denied"); };
+  const outcome = promise => promise.then(value => ({ value }), error => ({ error }));
+  const running = outcome(w.handle(command("Runtime.evaluate", "ordinary-a", { expression: "hold-old-rpc" }, a.targetId)));
+  await dispatched.promise;
+  const closing = outcome(w.handle(command("Browser.close", "ordinary-a")));
+  let firstAttach, afterDetach, rpcOnlyAttach, frozenAttachCount;
+  try {
+    await removeAttempted.promise;
+    await turn();
+    firstAttach = await outcome(w.handle(command("Target.attachToTarget", "ordinary-a", a)));
+    await w.handle(command("Runtime.evaluate", "ordinary-b", {}, b.targetId));
+    detach.resolve();
+    await turn();
+    afterDetach = await outcome(w.handle(command("Runtime.evaluate", "ordinary-a", {}, a.targetId)));
+    rpcOnlyAttach = await outcome(w.handle(command("Target.attachToTarget", "ordinary-a", a)));
+    frozenAttachCount = newAttaches;
+    await w.handle(command("Runtime.evaluate", "ordinary-b", {}, b.targetId));
+  } finally {
+    detach.resolve();
+    rpc.resolve();
+    await running;
+  }
+  const failed = await closing;
+  assert.equal(failed.error?.code, "CHROME_CLEANUP_PENDING");
+  assert.equal(firstAttach.error?.code, "CHROME_OWNER_CLOSING", JSON.stringify({
+    prematureAttachment: firstAttach.value, lateDetachResult: afterDetach.error?.message, frozenAttachCount,
+  }));
+  assert.equal(afterDetach.error?.code, "CHROME_OWNER_CLOSING", "accepted old RPC still holds the owner after detach settlement");
+  assert.equal(rpcOnlyAttach.error?.code, "CHROME_OWNER_CLOSING");
+  assert.equal(frozenAttachCount, 0, "no new actual attach may be dispatched during the old failed close");
+  const fresh = await w.handle(command("Target.attachToTarget", "ordinary-a", a));
+  await turn();
+  await w.handle(command("Runtime.evaluate", "ordinary-a", {}, fresh.sessionId));
+  assert.deepEqual([...w.shared.tabs.keys()], [aId, Number(b.targetId.slice(4))]);
+});
+
+test("T5 detach is not actual command settlement and cannot produce an early close ACK", async () => {
+  const w = worker();
+  const a = await w.handle(command("Target.createTarget", "a"));
+  await w.handle(command("Target.attachToTarget", "a", a));
+  const dispatched = deferred(), release = deferred();
+  w.chrome.debugger.sendCommand = async () => { dispatched.resolve(); await release.promise; throw new Error("actual command disconnected"); };
+  const running = w.handle(command("Page.captureScreenshot", "a", {}, a.targetId));
+  const rejected = assert.rejects(running, /disconnected/);
+  await dispatched.promise;
+  w.events.detach({ tabId: Number(a.targetId.slice(4)) });
+  let acknowledged = false;
+  const closing = w.handle(command("Browser.close", "a")).then(() => { acknowledged = true; });
+  await turn();
+  const prematureAck = acknowledged;
+  release.resolve();
+  await Promise.all([rejected, closing]);
+  assert.equal(prematureAck, false);
+  assert.equal(w.shared.tabs.size, 0);
+});
+
+test("T5 closing A never expires foreign review payload, even on a user tab", async () => {
+  const w = worker();
+  const a = await w.handle(command("Target.createTarget", "a"));
+  const id = Number(a.targetId.slice(4));
+  const own = "dsh-mark-review:own", foreign = "dsh-mark-review:foreign-expired";
+  w.shared.stored[own] = { tabId: id, expires: Date.now() + 1000, params: { title: "own" } };
+  w.shared.stored[foreign] = { tabId: 999, expires: Date.now() - 1000, params: { title: "foreign" }, sending: true };
+  const beforeForeign = structuredClone(w.shared.stored[foreign]);
+  w.events.removed(id);
+  await turn();
+  assert.equal(w.shared.stored[own], undefined);
+  assert.deepEqual(w.shared.stored[foreign], beforeForeign);
+});
+
+test("T5 unsupported downloads never query global history and do not block another owner", async () => {
+  const w = worker();
+  let queried = false;
+  w.chrome.downloads.search = async () => { queried = true; throw new Error("global inventory must not run"); };
+  await assert.rejects(w.handle(command("Browser.getDownloadItems", "a")), { code: "UNSUPPORTED_BROWSER_CAPABILITY" });
+  await w.handle(command("Browser.close", "a"));
+  const b = await w.handle(command("Target.createTarget", "b"));
+  assert.equal(queried, false);
+  assert.equal(w.shared.tabs.size, 1);
+  assert.equal([...w.shared.tabs.keys()][0], Number(b.targetId.slice(4)));
+});
+
+test("T5 remove interrupts an otherwise infinite evaluate before close drains it", async () => {
+  const w = worker();
+  const a = await w.handle(command("Target.createTarget", "a"));
+  const b = await w.handle(command("Target.createTarget", "b"));
+  await w.handle(command("Target.attachToTarget", "a", a));
+  await w.handle(command("Target.attachToTarget", "b", b));
+  const pending = deferred(), dispatched = deferred();
+  const removed = [], order = [];
+  const remove = w.chrome.tabs.remove;
+  w.chrome.debugger.sendCommand = async ({ tabId }) => {
+    if (tabId === Number(a.targetId.slice(4))) {
+      dispatched.resolve();
+      await pending.promise; // Only actual own tab removal can reject this.
+    }
+    return {};
+  };
+  w.chrome.tabs.remove = async ids => {
+    const list = Array.isArray(ids) ? ids : [ids];
+    removed.push(...list);
+    await remove(ids);
+    if (list.includes(Number(a.targetId.slice(4)))) {
+      order.push("own-tab-removed");
+      pending.reject(new Error("actual evaluate cancelled by own tab removal"));
+    }
+  };
+  const running = w.handle(command("Runtime.evaluate", "a", { expression: "await new Promise(() => {})", awaitPromise: true }, a.targetId));
+  const rejected = assert.rejects(running, /cancelled by own tab removal/).then(() => order.push("actual-command-settled"));
+  await dispatched.promise;
+  const closing = w.handle(command("Browser.close", "a")).then(() => order.push("close-ack"));
+  let timer;
+  try {
+    await Promise.race([closing, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("close deadlocked waiting for a command that only own removal can settle")), 250); })]);
+    await rejected;
+  } finally { clearTimeout(timer); }
+  assert.ok(order.indexOf("actual-command-settled") < order.indexOf("close-ack"));
+  assert.deepEqual(removed, [Number(a.targetId.slice(4))]);
+  await w.handle(command("Runtime.evaluate", "b", {}, b.targetId));
+  assert.deepEqual([...w.shared.tabs.keys()], [Number(b.targetId.slice(4))]);
+});
+
+test("T5 hello worker-instance generation is stable within one worker and changes on restart", async () => {
+  const first = worker();
+  const before = (await first.handle(command("DSH.hello", "a"))).engine.workerGeneration;
+  assert.equal(typeof before, "string");
+  assert.ok(before.length > 10);
+  assert.equal((await first.handle(command("DSH.hello", "b"))).engine.workerGeneration, before);
+  const restarted = worker(first.shared);
+  assert.notEqual((await restarted.handle(command("DSH.hello", "a"))).engine.workerGeneration, before);
+});
+
+test("T5 settled close permits a fresh generation for the same exact owner", async () => {
+  const w = worker();
+  const dispatched = deferred(), release = deferred();
+  const create = w.chrome.tabs.create;
+  let first = true;
+  w.chrome.tabs.create = async props => {
+    if (first) { first = false; dispatched.resolve(); await release.promise; }
+    return create(props);
+  };
+  const old = w.handle(command("Target.createTarget", "same-owner"));
+  const oldOutcome = old.then(value => ({ value }), error => ({ error }));
+  await dispatched.promise;
+  const closing = w.handle(command("Browser.close", "same-owner"));
+  await turn();
+  release.resolve();
+  await Promise.all([oldOutcome, closing]);
+  const fresh = await w.handle(command("Target.createTarget", "same-owner"));
+  await turn();
+  assert.deepEqual([...w.shared.tabs.keys()], [Number(fresh.targetId.slice(4))]);
+  assert.deepEqual(Array.from((await w.handle(command("Target.getTargets", "same-owner"))).targetInfos, item => item.targetId), [fresh.targetId]);
+});
+
+test("T5 tab session cannot forward global browser or foreign target lifecycle CDP", async () => {
+  const w = worker();
+  const a = await w.handle(command("Target.createTarget", "a"));
+  const b = await w.handle(command("Target.createTarget", "b"));
+  await w.handle(command("Target.attachToTarget", "a", a));
+  await assert.rejects(w.handle(command("Target.closeTarget", "a", b, a.targetId)), { code: "UNSUPPORTED_BROWSER_CAPABILITY" });
+  await w.handle(command("Browser.close", "a", {}, a.targetId));
+  assert.equal(w.commands.some(item => /^(?:Browser|Target)\./.test(item.method)), false);
+  assert.deepEqual([...w.shared.tabs.keys()], [Number(b.targetId.slice(4))]);
 });

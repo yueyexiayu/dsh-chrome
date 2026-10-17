@@ -1,0 +1,6 @@
+packages:
+  - .
+
+overrides:
+  '@deepseek-ai/cosmokit': file:vendor/browser-execution/deepseek-ai-cosmokit-1.8.6-alpha.1.tgz
+  '@standard-schema/spec': file:vendor/browser-execution/standard-schema-spec-1.1.0.tgz

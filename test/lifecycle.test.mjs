@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import test from "node:test";
+import { browserExecutionVersions } from "../lib/execution.js";
+import { engine } from "./fixtures/engine.mjs";
 
 function browser() {
   const source = readFileSync(new URL("../lib/browser.js", import.meta.url), "utf8")
     .replace(/^import[\s\S]*?;\n/gm, "").replace(/^export /gm, "")
     + '\nglobalThis.audit={pages,onBrowserEvent,ensure,ensurePage,adoptPage,shutdown,Cdp,setBridge(value){bridge=value;}};';
-  const context = { currentOwner: () => "owner-a", setTimeout, clearTimeout };
+  const context = { browserExecutionVersions, currentOwner: () => "owner-a", setTimeout, clearTimeout };
   vm.runInNewContext(source, context);
   return context.audit;
 }
@@ -32,7 +34,7 @@ test("unknown requested target fails rather than silently creating a different t
 
 test("failed close remains a visible failure and keeps retryable state", async () => {
   const api = browser();
-  const cdp = { closed: false, send: async () => { throw new Error("bridge offline"); } };
+  const cdp = { engine, closed: false, settleCreates: async () => {}, send: async () => { throw new Error("bridge offline"); } };
   api.setBridge(cdp);
   api.pages.set("owner-a", { cdp });
   await assert.rejects(api.shutdown(), /bridge offline/);
@@ -70,7 +72,7 @@ test("detach promptly fails in-flight commands and event waits for that tab", as
 test("group close still works after the cached tab was detached", async () => {
   const api = browser();
   const calls = [];
-  api.setBridge({ closed: false, send: async (method, params) => { calls.push({ method, owner: params.dshOwner }); }, close() {} });
+  api.setBridge({ engine, closed: false, settleCreates: async () => {}, send: async (method, params) => { calls.push({ method, owner: params.dshOwner }); }, close() {} });
   await api.shutdown();
   assert.equal(calls[0].method, "Browser.close");
   assert.equal(calls[0].owner, "owner-a");

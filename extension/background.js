@@ -1,9 +1,14 @@
-import { GROUP_TITLE, HOST_NAME, OWNERSHIP_KEY, canPick, groupTitle, ignoreFocusMethod, requireOwner, tabCreateProperties, windowCreateProperties } from "./policy.js";
+import { GROUP_TITLE, HOST_NAME, OWNERSHIP_KEY, canPick, groupTitle, ignoreFocusMethod, requireOwner, tabCreateProperties } from "./policy.js";
 import { jpegBoxes } from "./shot.js";
 
 const sessions = new Map();
 const tabOwners = new Map();
 const pendingMarks = new Map();
+// These are actual worker operations, not caller promises which may time out.
+const ownerOperations = new Map();
+const closingOwners = new Map();
+// Instance identity only: never a permission token or alternate admission path.
+const workerGeneration = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 let ownersReady = null;
 let ownersSaved = Promise.resolve();
 let port = null;
@@ -94,28 +99,65 @@ async function attachTab(tabId, owner) {
   return { sessionId, targetId: sessionId };
 }
 
-async function createTarget(url, owner) {
-  await loadOwners();
-  const wins = await chrome.windows.getAll({ windowTypes: ["normal"] });
-  const focused = wins.find((win) => win.focused) || wins[0];
-  let tab;
-  if (!focused) {
-    const created = await chrome.windows.create(windowCreateProperties(url || "about:blank"));
-    tab = created?.tabs?.find((item) => item.id != null);
-    if (created?.id == null || tab?.id == null) throw new Error("Chrome has no normal window");
-    tab.windowId = created.id;
-  } else {
-    tab = await chrome.tabs.create(tabCreateProperties(focused.id, url));
-    if (tab.id == null) throw new Error("Chrome did not return a tab id");
-    tab.windowId ??= focused.id;
+function assertOwnerOpen(owner) {
+  if (closingOwners.has(owner)) {
+    throw Object.assign(new Error("This DSH owner is closing; wait for actual cleanup settlement before starting new work"), { code: "CHROME_OWNER_CLOSING" });
   }
+}
+
+function ownerOperation(owner, method, work) {
+  assertOwnerOpen(owner);
+  let operations = ownerOperations.get(owner);
+  if (!operations) ownerOperations.set(owner, operations = new Set());
+  const operation = Promise.resolve().then(work);
+  const entry = { method, operation };
+  operations.add(entry); // Register synchronously, before dispatch or an await.
+  const settled = () => {
+    operations.delete(entry);
+    if (!operations.size && ownerOperations.get(owner) === operations) ownerOperations.delete(owner);
+  };
+  operation.then(settled, settled);
+  return operation;
+}
+
+async function removeTabs(ids) {
+  const removal = chrome.tabs.remove(ids);
+  if (!removal || typeof removal.then !== "function") {
+    throw Object.assign(new Error("Chrome tab removal has no settlement promise; ownership is retained for an explicit cleanup retry"), { code: "CHROME_CLEANUP_PENDING" });
+  }
+  await removal;
+}
+
+async function createTarget(url, owner) {
+  assertOwnerOpen(owner);
+  await loadOwners();
+  assertOwnerOpen(owner);
+  const wins = await chrome.windows.getAll({ windowTypes: ["normal"] });
+  assertOwnerOpen(owner); // A cancelled preflight must not dispatch a later create.
+  const focused = wins.find((win) => win.focused) || wins[0];
+  if (!focused) {
+    throw Object.assign(new Error("Chrome has no normal window. Background-tab control never creates a GUI window; explicitly open Chrome normally before borrowing it."), { code: "CHROME_NORMAL_WINDOW_REQUIRED" });
+  }
+  const tab = await chrome.tabs.create(tabCreateProperties(focused.id, url));
+  if (tab.id == null) throw new Error("Chrome did not return a tab id");
+  tab.windowId ??= focused.id;
+  // An actual resource belongs to its creator even if grouping/storage fails.
+  // Persist before grouping, so a restarted worker can clean up the exact child.
+  tabOwners.set(tab.id, owner);
   try {
-    await groupTab(tab.id, tab.windowId, owner);
-    tabOwners.set(tab.id, owner);
     await saveOwners();
+    assertOwnerOpen(owner);
+    await groupTab(tab.id, tab.windowId, owner);
+    assertOwnerOpen(owner);
   } catch (error) {
-    tabOwners.delete(tab.id);
-    await chrome.tabs.remove(tab.id);
+    try {
+      await removeTabs(tab.id);
+      tabOwners.delete(tab.id);
+      await saveOwners();
+    } catch (cleanupError) {
+      tabOwners.set(tab.id, owner);
+      throw Object.assign(new Error(`Chrome target ${sessionIdFor(tab.id)} initialization failed (${error.message}); cleanup/persistence is unconfirmed and ownership record retained: ${cleanupError.message}`), { code: "CHROME_CLEANUP_PENDING", cause: cleanupError });
+    }
     throw error;
   }
   return { targetId: sessionIdFor(tab.id) };
@@ -127,45 +169,116 @@ async function listAgentTabs(owner) {
   return tabs.filter((tab) => tab.id != null && tabOwners.get(tab.id) === owner);
 }
 
-async function closeAgentTabs(owner) {
+async function closeKnownTabs(owner) {
+  await loadOwners();
+  const recorded = [...tabOwners].filter(([, actualOwner]) => actualOwner === owner);
   const tabs = await listAgentTabs(owner);
   const ids = tabs.map((tab) => tab.id).filter((id) => id != null);
-  await Promise.all(ids.map(async (tabId) => {
+  const detachments = ids.map(async (tabId) => {
     try {
       await chrome.debugger.detach({ tabId });
     } catch {
-      // already detached
+      // Successful actual tab removal also disposes an already-detached debugger.
+    } finally {
+      sessions.delete(sessionIdFor(tabId));
     }
-    sessions.delete(sessionIdFor(tabId));
-  }));
-  if (ids.length) await chrome.tabs.remove(ids);
-  for (const id of ids) tabOwners.delete(id);
-  await saveOwners();
-  return {};
+  });
+  // Dispatch removal before waiting on commands/detach: evaluate(await forever)
+  // can settle only because its own target is interrupted or removed.
+  try {
+    if (ids.length) await removeTabs(ids);
+  } finally {
+    await Promise.all(detachments);
+  }
+  for (const [id] of recorded) tabOwners.delete(id);
+  try {
+    await saveOwners();
+  } catch (error) {
+    for (const [id, actualOwner] of recorded) tabOwners.set(id, actualOwner);
+    throw error;
+  }
 }
 
-function downloadRow(item) {
-  return {
-    id: String(item.id),
-    url: item.url || "",
-    filename: item.filename || "",
-    state: item.state || "in_progress",
+function closeAgentTabs(owner) {
+  if (closingOwners.has(owner)) return closingOwners.get(owner);
+  const accepted = [...(ownerOperations.get(owner) || [])];
+  const closing = (async () => {
+    try {
+      // First interrupt known own targets, rather than deadlock waiting for a
+      // command whose settlement requires exactly that interruption.
+      await closeKnownTabs(owner);
+      // A create already dispatched to Chrome can still return an actual ID.
+      // Retain/clean that exact child before the owner close can acknowledge.
+      await Promise.allSettled(accepted.filter(entry => entry.method === "Target.createTarget").map(entry => entry.operation));
+      await closeKnownTabs(owner);
+      await Promise.allSettled(accepted.map(entry => entry.operation));
+      await saveOwners();
+      return {};
+    } catch (error) {
+      // Failure must not release this owner while previously accepted RPCs live.
+      await Promise.allSettled(accepted.map(entry => entry.operation));
+      throw Object.assign(new Error(`Chrome owner cleanup is unconfirmed; retained ownership permits an explicit retry: ${error.message}`), { code: "CHROME_CLEANUP_PENDING", cause: error });
+    }
+  })();
+  closingOwners.set(owner, closing); // Freeze this owner synchronously.
+  const settled = () => {
+    if (closingOwners.get(owner) === closing) closingOwners.delete(owner);
   };
+  // Reuse is legal after actual settlement, never after a caller-only timeout.
+  closing.then(settled, settled);
+  return closing;
 }
 
-async function agentDownloadItems(owner) {
-  const tabs = await listAgentTabs(owner);
-  const tabIds = new Set(tabs.map((tab) => tab.id));
-  const items = await chrome.downloads.search({ limit: 20, orderBy: ["-startTime"] });
-  return items.filter((item) => item.tabId != null && tabIds.has(item.tabId)).map(downloadRow);
+function unsupportedCapability(message) {
+  return Object.assign(new Error(message), { code: "UNSUPPORTED_BROWSER_CAPABILITY" });
+}
+
+async function browserIdentity() {
+  const userAgent = typeof navigator === "object" ? String(navigator.userAgent || "") : "";
+  let version;
+  let versionError;
+  try {
+    const data = await globalThis.navigator?.userAgentData?.getHighEntropyValues(["fullVersionList"]);
+    const brand = data?.fullVersionList?.find(item => item.brand === "Google Chrome")
+      || data?.fullVersionList?.find(item => item.brand === "Chromium");
+    if (brand && /^\d+\.\d+\.\d+\.\d+$/.test(brand.version)) version = brand.version;
+  } catch (error) {
+    versionError = String(error?.message || error);
+  }
+  return {
+    kind: "external-browser", resolver: "chrome-extension-native-messaging",
+    ...(version ? { browserVersion: version } : {}),
+    versionSource: version ? "extension-worker-userAgentData.fullVersionList" : "unavailable",
+    ...(versionError ? { versionError } : {}), userAgent,
+    extensionVersion: chrome.runtime.getManifest?.().version,
+    workerGeneration,
+    capabilities: ["dom", "screenshot", "browser-extension", "authenticated-state"],
+  };
 }
 
 async function handle(message) {
   const method = String(message.method || "");
   const params = message.params || {};
-  if (method === "DSH.hello") return { ok: true, group: GROUP_TITLE, protocolVersion: 2 };
+  if (method === "DSH.hello") return { ok: true, group: GROUP_TITLE, protocolVersion: 2, engine: await browserIdentity() };
   const owner = ownerOf(params);
+  // Browser.close must never reach the borrowed browser's real CDP command,
+  // including when a caller supplies a tab sessionId.
+  if (method === "Browser.close") return closeAgentTabs(owner);
+  return ownerOperation(owner, method, () => handleOwner(message, method, params, owner));
+}
+
+async function handleOwner(message, method, params, owner) {
+  if (["Browser.setDownloadBehavior", "Target.createBrowserContext", "Target.disposeBrowserContext"].includes(method)
+    || (method === "Target.createTarget" && params.browserContextId !== undefined)) {
+    throw unsupportedCapability("The borrowed Chrome extension has no isolated browser context or independent download directory. Use an owned headless browser for these capabilities.");
+  }
+  if (method === "Browser.getDownloadItems") {
+    throw unsupportedCapability("Chrome DownloadItem has no tabId, so this extension cannot prove an owner-scoped download inventory. Downloads still use Chrome normally; no global history is exposed.");
+  }
   if (message.sessionId) {
+    if (/^(?:Browser|Target)\./.test(method)) {
+      throw unsupportedCapability("Browser and target lifecycle commands must use the owner-scoped extension API, not a tab CDP session");
+    }
     const tabId = sessions.get(message.sessionId);
     if (tabId == null) throw new Error(`tab session is gone: ${message.sessionId}`);
     await ownedTab(tabId, owner);
@@ -175,8 +288,7 @@ async function handle(message) {
   }
   if (ignoreFocusMethod(method)) return {};
   if (method === "Target.setDiscoverTargets") return {};
-  if (method === "Browser.setDownloadBehavior") return {};
-  if (method === "Browser.getDownloadItems") return { items: await agentDownloadItems(owner) };
+
   if (method === "Target.getTargets") {
     const tabs = await listAgentTabs(owner);
     return {
@@ -200,7 +312,7 @@ async function handle(message) {
       // already detached
     }
     sessions.delete(sessionIdFor(tabId));
-    await chrome.tabs.remove(tabId);
+    await removeTabs(tabId);
     tabOwners.delete(tabId);
     await saveOwners();
     return { success: true };
@@ -219,8 +331,7 @@ async function handle(message) {
       },
     };
   }
-  if (method === "Browser.setWindowBounds") return {};
-  if (method === "Browser.close") return closeAgentTabs(owner);
+  if (method === "Browser.setWindowBounds") throw unsupportedCapability("Background-tab control does not resize or activate the user's Chrome window");
   throw new Error(`unsupported browser command ${method}`);
 }
 
@@ -250,7 +361,7 @@ async function onMessage(message) {
     const result = await handle(message);
     post({ id: message.id, result });
   } catch (error) {
-    post({ id: message.id, error: { message: error instanceof Error ? error.message : String(error) } });
+    post({ id: message.id, error: { message: error instanceof Error ? error.message : String(error), ...(typeof error?.code === "string" ? { code: error.code } : {}) } });
   }
 }
 
@@ -297,27 +408,13 @@ chrome.debugger.onDetach.addListener((source) => {
   postEvent({ method: "Target.detachedFromTarget", params: { sessionId }, sessionId });
 });
 
-chrome.downloads.onCreated.addListener((item) => {
-  if (item.tabId == null || !sessions.has(sessionIdFor(item.tabId))) return;
-  postEvent({ method: "Browser.downloadWillBegin", params: downloadRow(item), sessionId: sessionIdFor(item.tabId) });
-});
-
-chrome.downloads.onChanged.addListener((delta) => {
-  if (!delta.filename && !delta.state) return;
-  chrome.downloads.search({ id: delta.id }).then((items) => {
-    const item = items[0];
-    if (!item || item.tabId == null || !sessions.has(sessionIdFor(item.tabId))) return;
-    postEvent({ method: "Browser.downloadProgress", params: downloadRow(item), sessionId: sessionIdFor(item.tabId) });
-  }).catch(() => {});
-});
-
 chrome.tabs.onRemoved.addListener((tabId) => {
   for (const [id, result] of confirmedReviews) if (result.tabId === tabId) confirmedReviews.delete(id);
   const targetId = sessionIdFor(tabId);
   const hadSession = sessions.delete(targetId);
   chrome.storage.session.get(null).then(stored => {
     const keys = Object.keys(stored).filter(key => key.startsWith(REVIEW_PREFIX)
-      && (stored[key]?.tabId === tabId || stored[key]?.expires < Date.now()));
+      && stored[key]?.tabId === tabId);
     return keys.length ? chrome.storage.session.remove(keys) : undefined;
   }).catch(error => console.error("DSH review cleanup failed", error));
   loadOwners().then(async () => {

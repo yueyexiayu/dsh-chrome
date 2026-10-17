@@ -4,19 +4,90 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@deepseek-ai/cosmokit': file:vendor/browser-execution/deepseek-ai-cosmokit-1.8.6-alpha.1.tgz
+  '@standard-schema/spec': file:vendor/browser-execution/standard-schema-spec-1.1.0.tgz
+
 importers:
 
   .:
     dependencies:
+      '@deepseek-ai/cordis':
+        specifier: file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz
+        version: file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz
+      '@deepseek-ai/cosmokit':
+        specifier: file:vendor/browser-execution/deepseek-ai-cosmokit-1.8.6-alpha.1.tgz
+        version: file:vendor/browser-execution/deepseek-ai-cosmokit-1.8.6-alpha.1.tgz
+      '@deepseek-ai/dsh-brand':
+        specifier: file:vendor/browser-execution/deepseek-ai-dsh-brand-0.2.1-alpha.2.tgz
+        version: file:vendor/browser-execution/deepseek-ai-dsh-brand-0.2.1-alpha.2.tgz(@deepseek-ai/cordis@file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz)
+      '@deepseek-ai/dsh-browser-use':
+        specifier: file:vendor/browser-execution/deepseek-ai-dsh-browser-use-0.2.1-alpha.4.browser-policy.1.tgz
+        version: file:vendor/browser-execution/deepseek-ai-dsh-browser-use-0.2.1-alpha.4.browser-policy.1.tgz(@deepseek-ai/cordis@file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz)(@deepseek-ai/dsh-brand@file:vendor/browser-execution/deepseek-ai-dsh-brand-0.2.1-alpha.2.tgz(@deepseek-ai/cordis@file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz))
+      '@standard-schema/spec':
+        specifier: file:vendor/browser-execution/standard-schema-spec-1.1.0.tgz
+        version: file:vendor/browser-execution/standard-schema-spec-1.1.0.tgz
       jpeg-js:
         specifier: 0.4.4
         version: 0.4.4
 
 packages:
 
+  '@deepseek-ai/cordis@file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz':
+    resolution: {integrity: sha512-h7BzHQKROvQSxO9Sd/WMUyvYJizRWDe23ewjk0yqBmM8/bC2aXhoEtgdXR2rK0zErFl55TAazaRRNxINziNsRA==, tarball: file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz}
+    version: 4.0.5-alpha.1
+    hasBin: true
+    peerDependencies:
+      '@deepseek-ai/cordis-plugin-include': ~1.0.10-alpha.1
+      '@deepseek-ai/cordis-plugin-loader': ~1.0.6-alpha.1
+    peerDependenciesMeta:
+      '@deepseek-ai/cordis-plugin-include':
+        optional: true
+      '@deepseek-ai/cordis-plugin-loader':
+        optional: true
+
+  '@deepseek-ai/cosmokit@file:vendor/browser-execution/deepseek-ai-cosmokit-1.8.6-alpha.1.tgz':
+    resolution: {integrity: sha512-SCIl21aM2BUWbW1+4OhNm3eabK5iAO77i+WSTZf6bC8dhn22Uq6xZYSJGUYm+O8rhXPPgUaGy80c+/uFppcTBw==, tarball: file:vendor/browser-execution/deepseek-ai-cosmokit-1.8.6-alpha.1.tgz}
+    version: 1.8.6-alpha.1
+
+  '@deepseek-ai/dsh-brand@file:vendor/browser-execution/deepseek-ai-dsh-brand-0.2.1-alpha.2.tgz':
+    resolution: {integrity: sha512-2eXC0lP2qKeMuFnVn5giV0D73ZxzfA+Q9qeaq9NiSZfSucUwSg5VLl4ndNZPDYd1lRwQJDK79GC3ZCcRCM28Rw==, tarball: file:vendor/browser-execution/deepseek-ai-dsh-brand-0.2.1-alpha.2.tgz}
+    version: 0.2.1-alpha.2
+    peerDependencies:
+      '@deepseek-ai/cordis': ~4.0.5-alpha.1
+
+  '@deepseek-ai/dsh-browser-use@file:vendor/browser-execution/deepseek-ai-dsh-browser-use-0.2.1-alpha.4.browser-policy.1.tgz':
+    resolution: {integrity: sha512-mOFDnr15iF3zj4XKFJ7e/A8KTDquR8c9js0GYVNhaLqfMUFcG3PPnlYkPr9A+O31VrZqpArxxAICcvDY6h3YRA==, tarball: file:vendor/browser-execution/deepseek-ai-dsh-browser-use-0.2.1-alpha.4.browser-policy.1.tgz}
+    version: 0.2.1-alpha.4.browser-policy.1
+    peerDependencies:
+      '@deepseek-ai/cordis': workspace:~
+      '@deepseek-ai/dsh-brand': workspace:*
+
+  '@standard-schema/spec@file:vendor/browser-execution/standard-schema-spec-1.1.0.tgz':
+    resolution: {integrity: sha512-pYPQn8pAodTJFjLvvKmGWn86lFLZyuHK/nCRGig/Kbrkh9j8t7e4gmtbz+ckP3MUm8DF5nm5SKmBUnmk2n1RPA==, tarball: file:vendor/browser-execution/standard-schema-spec-1.1.0.tgz}
+    version: 1.1.0
+
   jpeg-js@0.4.4:
     resolution: {integrity: sha512-WZzeDOEtTOBK4Mdsar0IqEU5sMr3vSV2RqkAIzUEV2BHnUfKGyswWFPFwK5EeDo93K3FohSHbLAjj0s1Wzd+dg==}
 
 snapshots:
+
+  '@deepseek-ai/cordis@file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz':
+    dependencies:
+      '@deepseek-ai/cosmokit': file:vendor/browser-execution/deepseek-ai-cosmokit-1.8.6-alpha.1.tgz
+      '@standard-schema/spec': file:vendor/browser-execution/standard-schema-spec-1.1.0.tgz
+
+  '@deepseek-ai/cosmokit@file:vendor/browser-execution/deepseek-ai-cosmokit-1.8.6-alpha.1.tgz': {}
+
+  '@deepseek-ai/dsh-brand@file:vendor/browser-execution/deepseek-ai-dsh-brand-0.2.1-alpha.2.tgz(@deepseek-ai/cordis@file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz)':
+    dependencies:
+      '@deepseek-ai/cordis': file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz
+
+  '@deepseek-ai/dsh-browser-use@file:vendor/browser-execution/deepseek-ai-dsh-browser-use-0.2.1-alpha.4.browser-policy.1.tgz(@deepseek-ai/cordis@file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz)(@deepseek-ai/dsh-brand@file:vendor/browser-execution/deepseek-ai-dsh-brand-0.2.1-alpha.2.tgz(@deepseek-ai/cordis@file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz))':
+    dependencies:
+      '@deepseek-ai/cordis': file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz
+      '@deepseek-ai/dsh-brand': file:vendor/browser-execution/deepseek-ai-dsh-brand-0.2.1-alpha.2.tgz(@deepseek-ai/cordis@file:vendor/browser-execution/deepseek-ai-cordis-4.0.5-alpha.1.tgz)
+
+  '@standard-schema/spec@file:vendor/browser-execution/standard-schema-spec-1.1.0.tgz': {}
 
   jpeg-js@0.4.4: {}

@@ -18,9 +18,9 @@ async function fixture(t) {
   return { root, file: path.join(root, "cache", "chrome-shortcuts.json") };
 }
 function harness(root, overrides = {}) {
-  const current = { owner: "conversation-one", downloads: [{ filename: "stale", state: "complete" }], cdp: { send: async () => ({ items: [] }) } };
+  const current = { owner: "conversation-one", cdp: { send: async () => ({ items: [] }) } };
   const context = { ...page, ...fs, path, os, randomUUID, Buffer, URL, console, setTimeout, clearTimeout,
-    process: { env: { DSH_HOME: root } }, current, ...overrides };
+    process: { env: { DSH_HOME: root } }, currentOwner: () => current.owner, current, ...overrides };
   vm.runInNewContext(source + '\nensure=async()=>current; globalThis.api={shortcut,downloads};', context);
   return { ...context.api, current };
 }
@@ -43,8 +43,12 @@ test("downloads propagates bridge and cancellation errors without stale/empty su
   for (const message of ["bridge disconnected", "cancelled", "Browser.getDownloadItems timed out"]) {
     h.current.cdp.send = async () => { throw new Error(message); };
     await assert.rejects(h.downloads(), new RegExp(message.replaceAll(".", "\\.")));
-    assert.equal(h.current.downloads[0].filename, "stale");
   }
+});
+test("downloads preserves explicit unsupported capability errors, never an empty success", async t => {
+  const f = await fixture(t); const h = harness(f.root);
+  h.current.cdp.send = async () => { throw Object.assign(new Error("owner inventory cannot be proved"), { code: "UNSUPPORTED_BROWSER_CAPABILITY" }); };
+  await assert.rejects(h.downloads(), { code: "UNSUPPORTED_BROWSER_CAPABILITY" });
 });
 test("downloads rejects malformed bridge response", async t => {
   const f = await fixture(t); const h = harness(f.root);

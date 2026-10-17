@@ -18,7 +18,7 @@ function harness(send, overrides = {}) {
     if (method === 'Page.getFrameTree' && !custom?.frameTree) return { frameTree: { frame: { id: 'top' } } };
     return custom ?? {};
   } } };
-  const context = { ...page, path, Buffer, process, console, setTimeout, clearTimeout, AbortController, Math, Date, current,
+  const context = { ...page, path, Buffer, process, console, setTimeout, clearTimeout, AbortController, Math, Date, current, currentOwner: () => 'test',
     randomUUID: () => 'test-unique', constants: { X_OK: 1 }, access: async () => {},
     assertBrowserPath: async (file) => file, writeBrowserFile: async (file) => file, readBrowserFile: async () => Buffer.from('png'), ...overrides };
   vm.runInNewContext(source + '\nensure=async()=>current; observe=async()=>"snapshot"; pages.set("test", current); globalThis.api={upload,screenshot,gif,getText,evaluateInPage,fill,a11y,element,uploadImage,delay,onBrowserEvent,query,storage};', context);

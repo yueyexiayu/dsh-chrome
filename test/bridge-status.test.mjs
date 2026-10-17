@@ -3,27 +3,30 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { getEventListeners } from 'node:events';
+import { browserExecutionVersions, extensionExecution, validateExtensionEngine } from '../lib/execution.js';
+import { engine } from './fixtures/engine.mjs';
 
 const source = readFileSync(new URL('../lib/browser.js', import.meta.url), 'utf8')
   .replace(/^import[\s\S]*?;\n/gm, '').replace(/^export /gm, '');
 function harness(options = {}) {
   const links = [], calls = []; let owner = 'owner-A', attempts = 0;
   class Link {
-    constructor() { this.readyState = 1; this.handlers = { message: new Set(), close: new Set() }; }
+    constructor() { this.hello = { engine }; this.readyState = 1; this.handlers = { message: new Set(), close: new Set() }; }
     addEventListener(name, fn) { this.handlers[name]?.add(fn); }
     send(text) {
       const message = JSON.parse(text); calls.push(message);
       if (options.sendError) throw new Error('transport send failed');
-      if (options.stall) return;
+      if (options.stall || options.deferMethods?.includes(message.method)) return;
       queueMicrotask(() => {
         const result = message.method === 'DSH.hello'
-          ? { ok: true, protocolVersion: options.protocol ?? 2 } : {};
+          ? { ok: true, protocolVersion: options.protocol ?? 2, engine } : {};
         for (const fn of this.handlers.message) fn({ data: JSON.stringify({ id: message.id, result }) });
       });
     }
     close() { this.readyState = 3; for (const fn of this.handlers.close) fn(); }
   }
   const ctx = {
+    browserExecutionVersions, extensionExecution, validateExtensionEngine,
     currentOwner: () => owner, groupTitle: value => 'DSH ' + value,
     setTimeout: (fn, ms) => setTimeout(fn, options.fastTimers ? 5 : ms), clearTimeout,
     AbortController, AbortSignal, WebSocket: { OPEN: 1, CONNECTING: 0 },
@@ -35,7 +38,7 @@ function harness(options = {}) {
       const link = new Link(); links.push(link); return link;
     },
   };
-  vm.runInNewContext(source + '\nglobalThis.api = { Cdp, browsers, ensure, openCaptureSession, exclusive, onBrowserEvent, pages, setBridge: value => { bridge = value; }, getBridge: () => bridge };', ctx);
+  vm.runInNewContext(source + '\nglobalThis.api = { Cdp, browsers, ensure, ensureBridge, openCaptureSession, exclusive, onBrowserEvent, pages, setBridge: value => { bridge = value; }, getBridge: () => bridge };', ctx);
   return { api: ctx.api, links, calls, attempts: () => attempts, owner: value => { owner = value; } };
 }
 
@@ -60,14 +63,16 @@ test('connection failure rejects instead of reporting a cached disconnected or c
   await assert.rejects(h.api.browsers('list'), /fixture handshake denied/);
 });
 
-test('queued cancellation never connects and active cancellation reaches the transport probe', async () => {
+test('queued cancellation never connects and active cancellation preserves the shared transport lifetime', async () => {
   const cancelled = new AbortController(); cancelled.abort(); const h = harness();
   await assert.rejects(h.api.browsers('list', undefined, cancelled.signal), /cancelled/);
   assert.equal(h.attempts(), 0);
   const signals = [], running = harness({ stall: true, signals }); const abort = new AbortController();
   const result = running.api.browsers('list', undefined, abort.signal);
   await new Promise(resolve => setImmediate(resolve)); abort.abort();
-  await assert.rejects(result, /cancelled/); assert.equal(signals[0], abort.signal);
+  await assert.rejects(result, /cancelled/);
+  assert.notEqual(signals[0], abort.signal);
+  assert.equal(signals[0].aborted, false, 'cancelling a completed probe must not cancel the shared connection lifetime');
 });
 
 test('health probe protocol failure is explicit and discards the invalid connection', async () => {
@@ -96,7 +101,7 @@ test('disconnect invalidates every owner cache without closing real tabs', async
 
 test('ensure never returns a stale page belonging to a different transport', async () => {
   const h = harness();
-  const fresh = { closed: false, send: async () => { throw new Error('fresh page command'); } };
+  const fresh = { closed: false, engine, send: async () => { throw new Error('fresh page command'); } };
   h.api.setBridge(fresh);
   h.api.pages.set('owner-A', { cdp: { closed: true }, sessionId: 'tab-old' });
   // This is independent of browsers(): the next page command must use fresh.
@@ -140,6 +145,84 @@ test('a timed-out status probe removes its abort listener', async () => {
   const h = harness({ stall: true, fastTimers: true }); const abort = new AbortController();
   await assert.rejects(h.api.browsers('list', undefined, abort.signal), /timed out/);
   assert.equal(getEventListeners(abort.signal, 'abort').length, 0);
+});
+
+test('T5 concurrent owner connection waiters use one bridge and A abort cannot poison B', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const signals = [];
+  const h = harness({ signals, beforeConnect: () => gate });
+  const abort = new AbortController();
+  const a = h.api.browsers('list', undefined, abort.signal);
+  const cancelled = assert.rejects(a, /cancelled/);
+  h.owner('owner-B');
+  const b = h.api.browsers('list');
+  await new Promise(resolve => setImmediate(resolve));
+  abort.abort();
+  await cancelled;
+  assert.equal(h.attempts(), 1);
+  assert.equal(signals[0].aborted, false);
+  release();
+  assert.match(await b, /bridge: connected/);
+  assert.equal(h.attempts(), 1);
+  assert.equal(h.links[0].readyState, 1);
+});
+
+test('T5 A failed health probe does not disconnect B cached on the shared bridge', async () => {
+  const options = {};
+  const h = harness(options);
+  await h.api.browsers('list');
+  const connection = h.api.getBridge();
+  const b = { cdp: connection, sessionId: 'tab-B' };
+  h.api.pages.set('owner-B', b);
+  options.protocol = 1;
+  await assert.rejects(h.api.browsers('list'), /protocol 2/);
+  assert.equal(h.links[0].readyState, 1);
+  assert.equal(h.api.pages.get('owner-B'), b);
+});
+
+test('T5 retained unknown create diagnostics are visible only to their owning conversation', async () => {
+  const h = harness({ deferMethods: ['Target.createTarget'] });
+  const connection = await h.api.ensureBridge();
+  const creating = connection.send('Target.createTarget', { url: 'about:blank' });
+  const rejected = assert.rejects(creating, /connection closed/);
+  const request = h.calls.at(-1);
+  h.links[0].close();
+  await rejected;
+  h.owner('owner-B');
+  const b = await h.api.browsers('list');
+  assert.match(b, /pending cleanup owners: none/);
+  assert.doesNotMatch(b, /owner-A|unconfirmed create diagnostics/);
+  h.owner('owner-A');
+  const a = await h.api.browsers('list');
+  assert.match(a, /pending cleanup owners: owner-A/);
+  assert.match(a, new RegExp(`"requestId":${request.id}`));
+  assert.match(a, /"workerGeneration":null/);
+  assert.match(a, /"startedAt":\d+,"disconnectedAt":\d+/);
+});
+
+test('T5 active resource cancellation holds A queue for real owner close ACK without touching B', async () => {
+  const h = harness({ deferMethods: ['Runtime.pending', 'Browser.close'] });
+  const connection = await h.api.ensureBridge();
+  const b = { cdp: connection, sessionId: 'tab-B' };
+  h.api.pages.set('owner-B', b);
+  const abort = new AbortController();
+  const running = h.api.exclusive(active => connection.send('Runtime.pending', {}, 'tab-A', active), abort.signal);
+  const cancelled = assert.rejects(running, /cancelled/);
+  let nextStarted = false;
+  const next = h.api.exclusive(async () => { nextStarted = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  abort.abort();
+  await new Promise(resolve => setImmediate(resolve));
+  const close = h.calls.find(call => call.method === 'Browser.close');
+  assert.ok(close, 'cancelling actual tab work must issue the worker owner barrier');
+  assert.equal(close.params.dshOwner, 'owner-A');
+  assert.equal(nextStarted, false);
+  for (const fn of h.links[0].handlers.message) fn({ data: JSON.stringify({ id: close.id, result: {} }) });
+  await Promise.all([cancelled, next]);
+  assert.equal(nextStarted, true);
+  assert.equal(h.api.pages.get('owner-B'), b);
+  assert.equal(h.links[0].readyState, 1);
 });
 
 test('a synchronous transport send failure removes its pending request and abort listener', async () => {
