@@ -189,16 +189,18 @@ test("picker does not attach the debugger", () => {
   const picker = readFileSync(path.join(root, "extension", "picker.js"), "utf8");
   const shot = readFileSync(path.join(root, "extension", "shot.js"), "utf8");
   assert.doesNotMatch(picker, /debugger|bringToFront|tabs\.update/);
+  assert.doesNotMatch(picker, /textarea|放入 DSH|dsh-review-save/);
   assert.match(shot, /image\/jpeg/);
   const background = readFileSync(path.join(root, "extension", "background.js"), "utf8");
   assert.match(background, /captureVisibleTab/);
   assert.match(background, /DSH\.mark/);
-  // The user's explicit review action opens a trusted editor in the foreground;
-  // agent-created target tabs must continue to stay in the background.
+  assert.match(background, /sidePanel/);
+  // Trusted editor is the extension side panel on the original tab; never activate a review tab.
   const createTarget = background.slice(background.indexOf("async function createTarget"), background.indexOf("async function listAgentTabs"));
   assert.doesNotMatch(createTarget, /active:\s*true/);
-  assert.match(background, /url: reviewUrl\(id\), active: true/);
+  assert.doesNotMatch(background, /active:\s*true/);
   assert.doesNotMatch(background, /focused:\s*true/);
+  assert.doesNotMatch(background, /tabs\.create\(\{\s*url:\s*"about:blank"/);
 });
 
 let consumerNumber = 0;

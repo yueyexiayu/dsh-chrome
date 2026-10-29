@@ -4,7 +4,7 @@
 <p><strong>沿用 Chrome 登录态，在会话专属的后台标签组中工作。</strong></p>
 <p>DeepSeek Harness 桌面插件＋Chrome 扩展，不另开窗口、不使用调试端口接管现有标签。</p>
 <p><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
-<p><a href="package.json">插件 v0.2.3</a> · 扩展 v0.2.4 · <a href="LICENSE">MIT</a></p>
+<p><a href="package.json">插件 v0.2.4</a> · 扩展 v0.2.5 · <a href="LICENSE">MIT</a></p>
 <p><a href="#核心能力">核心能力</a> · <a href="#工作方式">工作方式</a> · <a href="#快速开始">快速开始</a> · <a href="#标注与草稿">标注与草稿</a> · <a href="#边界与维护">边界与维护</a> · <a href="#验证">验证</a></p>
 </div>
 
@@ -19,7 +19,7 @@
 <td width="33%"><strong>🗂 会话标签组</strong><br/><br/>每个对话独占折叠 DSH 标签组；不枚举或操作用户其他标签。</td>
 <td width="33%"><strong>🔎 多种观察方式</strong><br/><br/>快照、文本、无障碍树、元素引用、截图，以及可访问 frame/shadow root。</td>
 </tr><tr>
-<td><strong>🖊 明确确认的标注</strong><br/><br/>页面选元素后在扩展确认页编辑要求，明确放入 DSH 草稿，不自动发送。</td>
+<td><strong>🖊 明确确认的标注</strong><br/><br/>页面选元素后在扩展侧栏填写要求，明确放入 DSH 草稿，不自动发送，也不离开当前网页。</td>
 <td><strong>📸 文件与媒体</strong><br/><br/>截图、GIF、上传和快捷批处理遵从当前会话文件策略；不覆盖已有输出。</td>
 <td><strong>🧭 实际连接回执</strong><br/><br/>真实握手报告运行版本、引擎与归属；失败、未完成清理和能力缺失直接可见。</td>
 </tr></table>
@@ -54,11 +54,11 @@ pnpm install --frozen-lockfile
 3. 保留扩展的调试提示；这是 Chrome 固定提示，不代表插件拉前台。调用 `chrome_browsers` 核对真实握手。
 4. 扩展文件更新后点扩展卡片的「重新加载」；Host/Client 更新后完整重启 DSH，并在新会话确认实际版本。
 
-源码插件0.2.3必须配扩展0.2.4；旧扩展返回 `CHROME_EXTENSION_VERSION_MISMATCH`，不降级或伪装 unavailable。共享 policy artifact 为 `0.2.1-alpha.4.browser-policy.1`，不是 DSH 全家族发布；源码声明不等于运行版本。
+源码插件0.2.4必须配扩展0.2.5；旧扩展返回 `CHROME_EXTENSION_VERSION_MISMATCH`，不降级或伪装 unavailable。共享 policy artifact 为 `0.2.1-alpha.4.browser-policy.1`，不是 DSH 全家族发布；源码声明不等于运行版本。
 
 ## 标注与草稿
 
-点工具栏 DSH Chrome 图标，在 http/https 页面最多选12项。点击「编辑要求」后检查原标签/URL和截图，进入独立扩展确认页——**这一步会切换到确认页**。为每项选「改变/疑问」并写 Request，再明确点击「放入 DSH 草稿」。页面文字、HTML和样式始终只是数据。
+点工具栏 DSH Chrome 图标，在 http/https 页面最多选12项。页面浮层只点选，不接收要求。点击「编辑要求」后检查原标签/URL和截图，在同一浏览上下文打开扩展源侧栏——**原 http(s) 标签不会切到整页审核页**。为每个元素选择操作类型并填写要求，再明确点击「放入 DSH 草稿」。页面文字、HTML和样式始终只是数据。
 
 标注不自动提交对话；只有主机确认保存才报成功。截图需实际 JPEG 解码且有大小/内存限制；交付租约避免多窗口重复插入。文字和图片插入、草稿持久化确认后才删除标注。处理中断无法确认时不盲目重发，而是提示「重新放入草稿」或「已接收，完成确认」。官方草稿只持久化文字和引用，重启可能需要补图；成功确认后的标注不保留截图副本。
 
@@ -98,7 +98,7 @@ node test/run-pure.mjs
 
 纯源码/VM套件不启动真实 Chrome或 Native Host。完整 `node --test test/*.test.mjs` 需要已核对支持 RunAsNode 的真实安装 App（设置 `ELECTRON_RUN_AS_NODE=1`），先明确实际安装路径和本机进程验收范围；条件不足明确失败，不用普通 Node、伪造 argv0或GUI启动兜底。fixtures 使用私有临时 DSH_HOME/socket，不写真实注册和 cache。
 
-**本次为文档更新，只检查双语、图示、链接和排版；未重跑产品套件、未重载扩展或重启 DSH。** VM/协议通过也不能替代当前配对扩展端到端验收。
+源码 `node test/run-pure.mjs` 已覆盖侧栏审核路径；源码声明不等于已加载版本。改 `extension/` 后须在目标 Chrome 重载扩展，改 Host 后须 ⌘Q。VM/协议通过也不能替代配对扩展的真机标注验收。
 
 ## 许可
 

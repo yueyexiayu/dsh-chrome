@@ -6,9 +6,8 @@ let busy = false;
 function el(tag, text) { const node = document.createElement(tag); if (text) node.textContent = text; return node; }
 async function request(type, extra = {}) {
   const tab = await chrome.tabs.getCurrent();
-  if (tab?.id == null) throw new Error("请在独立扩展标签页中打开标注");
   let response;
-  try { response = await chrome.runtime.sendMessage({ type, id, tabId: tab.id, ...extra }); }
+  try { response = await chrome.runtime.sendMessage({ type, id, ...(tab?.id != null ? { tabId: tab.id } : {}), ...extra }); }
   catch (error) {
     if (type === "dsh-review-save") return { uncertain: true, warning: `结果未确认，请先到 DSH 检查；为避免重复，本审核页禁止再次发送。${error.message}` };
     throw error;
@@ -21,10 +20,12 @@ async function request(type, extra = {}) {
 function outcome(result) {
   save.disabled = true;
   status.textContent = result.warning || (result.sent
-    ? "已交给 DSH 标注队列，等待可用会话接收；没有自动发送消息。可以关闭此页。"
+    ? "已交给 DSH 标注队列，等待可用会话接收；没有自动发送消息。可以关闭侧栏，当前网页未离开。"
     : "结果未确认，请先到 DSH 检查；为避免重复，本审核页禁止再次发送。");
 }
-try {
+if (!id) {
+  status.textContent = "请在当前页面点选元素，然后点击「编辑要求」。要求不会出现在网页浮层中。";
+} else try {
   const result = await request("dsh-review-load");
   if (result.sent) outcome(result);
   else {

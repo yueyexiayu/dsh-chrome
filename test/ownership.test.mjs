@@ -51,6 +51,11 @@ function worker(shared = { tabs: new Map(), stored: {}, next: 1, group: 1 }) {
       onCreated: event("downloadCreated"), onChanged: event("downloadChanged"),
     },
     action: { onClicked: event("click"), async setBadgeText({ text }) { shared.badge = text; }, async setBadgeBackgroundColor() {}, async setTitle({ title }) { shared.title = title; } },
+    sidePanel: {
+      async setOptions(options) { shared.sidePanel = { ...options }; },
+      async open(options) { shared.sidePanelOpen = { ...options }; },
+      async setPanelBehavior(options) { shared.sidePanelBehavior = { ...options }; },
+    },
     runtime: {
       id: "fixture-extension", getURL(file) { return `chrome-extension://fixture-extension/${file}`; },
       connectNative() { return native; }, onConnect: event("pickerConnect"), onMessage: event("pickerMessage"),
@@ -195,6 +200,17 @@ async function reviewFixture(w = worker()) {
   return { w, id, key, sender, pageSender, message, save: { type: "dsh-review-save", id, requests: [{ note: "Real user request", intent: "change" }] } };
 }
 
+test("prepareReview stays on the original http(s) tab and opens the extension side panel", async () => {
+  const { w, id } = await reviewFixture();
+  assert.deepEqual([...w.shared.tabs.keys()], [99]);
+  assert.equal(w.shared.tabs.get(99).active, true);
+  assert.equal(w.shared.tabs.get(99).url, "https://example.com/");
+  assert.equal(w.shared.sidePanel.tabId, 99);
+  assert.equal(w.shared.sidePanel.path, `review.html?id=${id}`);
+  assert.equal(w.shared.sidePanel.enabled, true);
+  assert.equal(w.shared.sidePanelOpen.tabId, 99);
+});
+
 test("trusted review reports success only after the corresponding host save acknowledgement", async () => {
   const { w, save, sender } = await reviewFixture();
   assert.equal(w.sent.length, 0, "page data alone must never post a mark");
@@ -262,6 +278,8 @@ test("review rejects forged sender, foreign tab, subframe, expired record and em
     await assert.rejects(w.handleReview(save, forged), /可信|过期/);
   }
   await assert.rejects(w.handleReview({ ...save, requests: [{ note: "", intent: "change" }] }, sender), /填写/);
+  await assert.rejects(w.handleReview({ ...save, requests: [] }, sender), /数量/);
+  await assert.rejects(w.handleReview({ ...save, requests: [save.requests[0], save.requests[0]] }, sender), /数量/);
   w.shared.stored[key].expires = Date.now() - 1;
   await assert.rejects(w.handleReview(save, sender), /过期/);
   assert.equal(w.sent.length, 0);
@@ -270,9 +288,10 @@ test("review rejects forged sender, foreign tab, subframe, expired record and em
 test("extension-page messages without sender.tab still require bound tab and exact current URL", async () => {
   const { w, id, sender } = await reviewFixture();
   const withoutTab = { id: sender.id, url: sender.url };
+  assert.ok((await w.handleReview({ type: "dsh-review-load", id }, withoutTab)).params);
   const message = { type: "dsh-review-load", id, tabId: sender.tab.id };
   assert.ok((await w.handleReview(message, withoutTab)).params);
-  await assert.rejects(w.handleReview({ ...message, tabId: 99 }, withoutTab), /过期/);
+  await assert.rejects(w.handleReview({ ...message, tabId: 77 }, withoutTab), /过期/);
   w.shared.tabs.get(sender.tab.id).url = "https://changed.invalid/";
   await assert.rejects(w.handleReview(message, withoutTab), /切换/);
 });
@@ -395,9 +414,9 @@ test("review UI distinguishes confirmed rejection from uncertain or partially re
     }
     const nodes = Object.fromEntries(["status", "save", "source", "preview", "items", "review"].map(id => [id, new Element()]));
     const created = [];
-    const context = vm.createContext({ URL, location: { href: "https://fixture.invalid/review.html?id=test" },
+    const context = vm.createContext({ URL, location: { href: "chrome-extension://fixture-extension/review.html?id=test" },
       document: { getElementById: id => nodes[id], createElement: tag => { const element = new Element(); element.tag = tag; created.push(element); return element; } },
-      chrome: { tabs: { async getCurrent() { return { id: 1 }; } }, runtime: { async sendMessage(message) {
+      chrome: { tabs: { async getCurrent() { return undefined; } }, runtime: { async sendMessage(message) {
         if (message.type === "dsh-review-load") return { ok: true, params: { title: "Fixture", url: "https://fixture.invalid/", image: "fixture", items: [{}] } };
         if (mode === "transport-error") throw new Error("channel closed");
         if (mode === "undefined") return undefined;

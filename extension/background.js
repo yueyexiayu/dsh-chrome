@@ -463,8 +463,13 @@ async function retryConnection() {
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = null;
   chrome.action.setBadgeText({ text: "" }).catch(() => {});
-  chrome.action.setTitle({ title: "选择元素并在独立扩展页填写要求" }).catch(() => {});
+  chrome.action.setTitle({ title: "选择元素并在扩展侧栏填写要求" }).catch(() => {});
   connect();
+}
+
+async function showReviewPanel(tabId, path = "review.html") {
+  await chrome.sidePanel.setOptions({ tabId, path, enabled: true });
+  try { await chrome.sidePanel.open({ tabId }); } catch { /* already open, or no remaining user gesture */ }
 }
 
 chrome.action.onClicked.addListener(async (tab) => {
@@ -474,6 +479,7 @@ chrome.action.onClicked.addListener(async (tab) => {
     return;
   }
   try {
+    await showReviewPanel(tab.id);
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["picker.js"] });
     await chrome.tabs.sendMessage(tab.id, { type: "dsh-pick-start" });
   } catch {
@@ -515,16 +521,14 @@ async function prepareReview(message, sender) {
     if (!after.active || after.url !== current.url || after.windowId !== current.windowId) throw new Error("截图时页面已切换，请重试");
     const image = await jpegBoxes(dataUrl, items.map(item => item.box), viewport);
     const id = crypto.randomUUID();
-    // Load only after the durable session record and its tab binding exist.
-    const reviewTab = await chrome.tabs.create({ url: "about:blank", active: false, windowId: tab.windowId });
     const key = REVIEW_PREFIX + id;
+    // Bind the original http(s) tab. Never open or activate a full-page review tab.
     try {
-      await chrome.storage.session.set({ [key]: { tabId: reviewTab.id, expires: Date.now() + 30 * 60_000,
+      await chrome.storage.session.set({ [key]: { tabId: tab.id, expires: Date.now() + 30 * 60_000,
         params: { url: current.url, title: String(message.title || "").slice(0, 200), items, viewport: `${Math.round(viewport.width)}x${Math.round(viewport.height)}`, image } } });
-      await chrome.tabs.update(reviewTab.id, { url: reviewUrl(id), active: true });
+      await showReviewPanel(tab.id, `review.html?id=${id}`);
     } catch (error) {
       await chrome.storage.session.remove(key);
-      await chrome.tabs.remove(reviewTab.id);
       throw error;
     }
     return {};
@@ -549,16 +553,17 @@ function reviewItems(raw) {
 async function handleReview(message, sender) {
   if (!/^[a-f0-9-]{36}$/.test(message.id || "") || sender.id !== chrome.runtime.id
     || (sender.frameId != null && sender.frameId !== 0) || sender.url !== reviewUrl(message.id)) throw new Error("要求只能在可信扩展编辑页确认");
-  // Extension pages may omit MessageSender.tab; getCurrent supplies their
-  // tab id, but it is accepted only after the trusted-origin checks above.
-  const tabId = sender.tab?.id ?? message.tabId;
+  // Side panel pages may omit MessageSender.tab. tabId from the editor is
+  // accepted only after the trusted-origin checks above, and must match the bound page tab.
   const key = REVIEW_PREFIX + message.id;
   const record = (await chrome.storage.session.get(key))[key];
-  if (!record || record.tabId !== tabId || record.expires < Date.now()) throw new Error("标注已过期，请重新选择");
-  const current = await chrome.tabs.get(tabId);
-  if (current.url !== reviewUrl(message.id)) throw new Error("审核标签页已切换，请重新选择");
+  if (!record || record.expires < Date.now()) throw new Error("标注已过期，请重新选择");
+  const tabId = sender.tab?.id ?? message.tabId ?? record.tabId;
+  if (record.tabId !== tabId) throw new Error("标注已过期，请重新选择");
   if (confirmedReviews.has(message.id)) return confirmedReviews.get(message.id);
   if (record.sent) return { sent: true };
+  const current = await chrome.tabs.get(tabId);
+  if (current.url !== record.params.url) throw new Error("原页面已切换，请重新选择");
   if (reviewing.has(message.id)) throw new Error("正在保存，请勿重复提交");
   if (record.sending) return { uncertain: true, warning: UNCERTAIN_REVIEW, params: record.params };
   if (message.type === "dsh-review-load") return { params: record.params };
@@ -597,6 +602,7 @@ async function handleReview(message, sender) {
   } finally { reviewing.delete(message.id); }
 }
 
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 chrome.runtime.onStartup.addListener(retryConnection);
 chrome.runtime.onInstalled.addListener(retryConnection);
 conflictReady.then(connect).catch(error => console.error("DSH connection state failed", error));

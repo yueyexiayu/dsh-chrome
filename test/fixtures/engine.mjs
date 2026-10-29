@@ -4,6 +4,6 @@ export const engine = Object.freeze({
   resolver: "chrome-extension-native-messaging",
   browserVersion: "1.2.3.4",
   versionSource: "extension-worker-userAgentData.fullVersionList",
-  extensionVersion: "0.2.4",
+  extensionVersion: "0.2.5",
   capabilities: Object.freeze(["dom", "screenshot", "browser-extension", "authenticated-state"]),
 });

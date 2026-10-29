@@ -121,10 +121,9 @@ test("extension source does not activate a tab or window", () => {
   assert.match(source, /CHROME_NORMAL_WINDOW_REQUIRED/);
   assert.match(source, /ignoreFocusMethod\(/);
   assert.match(source, /groupTitle\(owner\)/);
-  // The explicit toolbar edit action may show its trusted confirmation page;
-  // tool-created/controlled tabs must still never activate a tab or window.
-  const withoutUserReview = source.replace('chrome.tabs.update(reviewTab.id, { url: reviewUrl(id), active: true })', 'USER_REVIEW');
-  assert.doesNotMatch(withoutUserReview, /active:\s*true/);
+  // Trusted review stays in the extension side panel; tool-created tabs must never activate.
+  assert.doesNotMatch(source, /active:\s*true/);
+  assert.match(source, /sidePanel/);
   assert.doesNotMatch(source, /focused:\s*true/);
   assert.doesNotMatch(source, /bringToFront/);
 });

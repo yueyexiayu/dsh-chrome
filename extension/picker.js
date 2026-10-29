@@ -74,7 +74,7 @@
     panel?.remove(); controls.clear();
     panel = node("div");
     panel.style.cssText = "position:fixed;right:16px;top:16px;width:320px;padding:12px;background:#202124;color:#fff;border:1px solid #777;border-radius:10px;z-index:2147483647;font:13px/1.5 sans-serif;box-shadow:0 4px 24px #0008";
-    panel.append(node("strong", "DSH · 选择页面元素"), node("p", message || "点选多个元素；用户要求将在独立扩展页中填写。Esc 退出。"));
+    panel.append(node("strong", "DSH · 选择页面元素"), node("p", message || "点选多个元素；用户要求将在扩展侧栏中填写，不会离开当前网页。Esc 退出。"));
     selected.forEach((el, index) => {
       const row = node("div", `${index + 1}. ${describe(el).name || el.tagName}`);
       row.append(button("移除", () => { selected.splice(index, 1); render(); draw(); }));
@@ -94,7 +94,7 @@
     try {
       const response = await chrome.runtime.sendMessage({ type: "dsh-pick-review", url: location.href, title: document.title, items,
         viewport: { width: window.innerWidth, height: window.innerHeight } });
-      if (!response?.ok) throw new Error(response?.error || "未能打开要求编辑页");
+      if (!response?.ok) throw new Error(response?.error || "未能打开要求编辑侧栏");
       stop();
     } catch (error) { busy = false; render(error.message); draw(); }
   }

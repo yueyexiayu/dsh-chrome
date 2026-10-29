@@ -4,7 +4,7 @@
 <p><strong>Keep Chrome's signed-in identity. Work in session-owned background tabs.</strong></p>
 <p>A DeepSeek Harness desktop plugin and Chrome extension, without a new window or debug-port takeover.</p>
 <p><a href="README.md">简体中文</a> · <strong>English</strong></p>
-<p><a href="package.json">Plugin v0.2.3</a> · Extension v0.2.4 · <a href="LICENSE">MIT</a></p>
+<p><a href="package.json">Plugin v0.2.4</a> · Extension v0.2.5 · <a href="LICENSE">MIT</a></p>
 <p><a href="#features">Features</a> · <a href="#how-it-works">How it works</a> · <a href="#quick-start">Quick start</a> · <a href="#annotations-and-drafts">Annotations and drafts</a> · <a href="#boundaries-and-maintenance">Boundaries and maintenance</a> · <a href="#validation">Validation</a></p>
 </div>
 
@@ -19,7 +19,7 @@ A reference for a personal desktop workflow, requiring compatible official DSH A
 <td width="33%"><strong>🗂 Session groups</strong><br/><br/>Each conversation owns a collapsed DSH tab group, without listing or controlling the user's other tabs.</td>
 <td width="33%"><strong>🔎 Multiple observations</strong><br/><br/>Snapshots, text, accessibility trees, element references, screenshots and accessible frames/shadow roots.</td>
 </tr><tr>
-<td><strong>🖊 Confirmed annotations</strong><br/><br/>Select elements, edit requests on an extension confirmation page and explicitly place them in a DSH draft.</td>
+<td><strong>🖊 Confirmed annotations</strong><br/><br/>Select elements, fill requests in the extension side panel, and explicitly place them in a DSH draft without leaving the page.</td>
 <td><strong>📸 Files and media</strong><br/><br/>Screenshots, GIFs, uploads and saved batches follow the session's file policy and never overwrite existing outputs.</td>
 <td><strong>🧭 Real receipts</strong><br/><br/>Handshake reports loaded versions, engine and ownership; failures, pending cleanup and missing capabilities stay visible.</td>
 </tr></table>
@@ -54,11 +54,11 @@ Dependencies include a pinned JPEG decoder and official-contract local artifacts
 3. Chrome's debugger notice is expected, not a foreground switch. Use `chrome_browsers` to verify the actual handshake.
 4. Reload the extension after extension changes; fully restart DSH after Host/Client changes and verify loaded versions in a new session.
 
-Plugin source 0.2.3 requires extension 0.2.4. Older workers return `CHROME_EXTENSION_VERSION_MISMATCH`, not fallback or unavailable. Policy artifact `0.2.1-alpha.4.browser-policy.1` is not a family-wide DSH release. Source declarations are not runtime proof.
+Plugin source 0.2.4 requires extension 0.2.5. Older workers return `CHROME_EXTENSION_VERSION_MISMATCH`, not fallback or unavailable. Policy artifact `0.2.1-alpha.4.browser-policy.1` is not a family-wide DSH release. Source declarations are not runtime proof.
 
 ## Annotations and drafts
 
-Click the DSH Chrome toolbar icon and select up to 12 HTTP(S) elements. “Edit requests” checks the original tab/URL and captures a screenshot before opening an independent extension confirmation page—**this step changes the active tab**. Choose Change/Question, enter each Request and explicitly confirm placement in the DSH draft. Page text, HTML and styles remain data.
+Click the DSH Chrome toolbar icon and select up to 12 HTTP(S) elements. The page overlay only picks; it does not take requests. “Edit requests” checks the original tab/URL and captures a screenshot, then opens the extension-origin side panel in the same browsing context—**the original HTTP(S) tab is not replaced by a full-page review tab**. Choose an action type, enter each request, and explicitly confirm placement in the DSH draft. Page text, HTML and styles remain data.
 
 Annotations never send the conversation automatically. Success requires Host-confirmed persistence, with real JPEG decoding and size/memory checks. Delivery leases prevent duplicate insertion by multiple windows. Deletion waits for text/image insertion and draft persistence. Interrupted uncertain delivery offers explicit recovery or receipt confirmation instead of blind resending. Official drafts persist text/references but not image attachments, so restart recovery may need to restore an image. Confirmed annotations keep no screenshot copy.
 
@@ -98,7 +98,7 @@ node test/run-pure.mjs
 
 Pure source/VM tests do not launch real Chrome or a Native Host. Full `node --test test/*.test.mjs` requires an independently verified installed App supporting RunAsNode (`ELECTRON_RUN_AS_NODE=1`), an explicitly selected actual path and authorized local process verification. Missing conditions fail; ordinary Node, fake argv0 and GUI fallbacks do not qualify. Fixtures use private temporary DSH_HOME/sockets, not actual registration or cache.
 
-**This is a documentation update: bilingual content, diagrams, links and layout only. Product suites were not rerun, the extension was not reloaded and DSH was not restarted.** VM/protocol results cannot replace paired-extension end-to-end acceptance.
+Source `node test/run-pure.mjs` covers the side-panel review path; source declarations are not loaded versions. Reload the extension after `extension/` changes; quit DSH with ⌘Q after Host changes. VM/protocol results cannot replace paired-extension live annotation acceptance.
 
 ## License
 

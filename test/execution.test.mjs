@@ -11,15 +11,15 @@ function request(sessionId = "owner-a", changes = {}) {
 }
 
 test("runtime versions come from installed adapter and local artifact manifests", () => {
-  assert.equal(browserExecutionVersions.adapter, "0.2.3");
-  assert.equal(browserExecutionVersions.extension, "0.2.4");
+  assert.equal(browserExecutionVersions.adapter, "0.2.4");
+  assert.equal(browserExecutionVersions.extension, "0.2.5");
   assert.equal(browserExecutionVersions.policy, "0.2.1-alpha.4.browser-policy.1");
   assert.equal(browserExecutionVersions.policySourceSha256, "1a0d4cb9021826ef0cbba2f63a0fd07d4f295fd01418f5e61754c9b897a362a8");
 });
 
 test("T5 an old, missing or different worker version cannot satisfy the current lifecycle contract", () => {
   const spec = extensionExecution("owner-a", request());
-  for (const extensionVersion of [undefined, "0.2.3", "0.2.5", "synthetic-worker"]) {
+  for (const extensionVersion of [undefined, "0.2.3", "0.2.4", "synthetic-worker"]) {
     assert.throws(() => validateExtensionEngine(spec, { ...engine, extensionVersion }), { code: "CHROME_EXTENSION_VERSION_MISMATCH" });
   }
   assert.equal(validateExtensionEngine(spec, engine).browserVersion, "1.2.3.4");
@@ -30,10 +30,10 @@ test("T5 loaded artifact versions are immutable snapshots, not live manifest loo
   try {
     pluginPackage.version = "999.0.0";
     extensionManifest.version = "999.0.0";
-    assert.equal(browserExecutionVersions.adapter, "0.2.3");
-    assert.equal(browserExecutionVersions.extension, "0.2.4");
+    assert.equal(browserExecutionVersions.adapter, "0.2.4");
+    assert.equal(browserExecutionVersions.extension, "0.2.5");
     assert.equal(Object.isFrozen(browserExecutionVersions), true);
-    assert.equal(validateExtensionEngine(extensionExecution("owner-a"), engine).extensionVersion, "0.2.4");
+    assert.equal(validateExtensionEngine(extensionExecution("owner-a"), engine).extensionVersion, "0.2.5");
   } finally {
     pluginPackage.version = adapter;
     extensionManifest.version = extension;
