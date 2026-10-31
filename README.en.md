@@ -4,7 +4,7 @@
 <p><strong>Keep Chrome's signed-in identity. Work in session-owned background tabs.</strong></p>
 <p>A DeepSeek Harness desktop plugin and Chrome extension, without a new window or debug-port takeover.</p>
 <p><a href="README.md">简体中文</a> · <strong>English</strong></p>
-<p><a href="package.json">Plugin v0.2.4</a> · Extension v0.2.5 · <a href="LICENSE">MIT</a></p>
+<p><a href="package.json">Plugin v0.2.5</a> · Extension v0.2.5 · <a href="LICENSE">MIT</a></p>
 <p><a href="#features">Features</a> · <a href="#how-it-works">How it works</a> · <a href="#quick-start">Quick start</a> · <a href="#annotations-and-drafts">Annotations and drafts</a> · <a href="#boundaries-and-maintenance">Boundaries and maintenance</a> · <a href="#validation">Validation</a></p>
 </div>
 
@@ -30,6 +30,8 @@ A reference for a personal desktop workflow, requiring compatible official DSH A
 
 This is a **headed / borrowed-connection backend**, **not headless**. Routine background actions do not bring Chrome forward or create windows. Missing normal windows return `CHROME_NORMAL_WINDOW_REQUIRED`. Automated DOM/screenshot regression and anonymous isolation require a separately owned Chromium headless shell.
 
+When navigating to the current local DSH Web address, the plugin establishes browser authorization inside the Host before opening the target. Only the current local listener matches; other sites are unaffected.
+
 ## Quick start
 
 Requires compatible DSH desktop, a normal macOS Chrome window and pnpm 11.
@@ -54,7 +56,7 @@ Dependencies include a pinned JPEG decoder and official-contract local artifacts
 3. Chrome's debugger notice is expected, not a foreground switch. Use `chrome_browsers` to verify the actual handshake.
 4. Reload the extension after extension changes; fully restart DSH after Host/Client changes and verify loaded versions in a new session.
 
-Plugin source 0.2.4 requires extension 0.2.5. Older workers return `CHROME_EXTENSION_VERSION_MISMATCH`, not fallback or unavailable. Policy artifact `0.2.1-alpha.4.browser-policy.1` is not a family-wide DSH release. Source declarations are not runtime proof.
+Plugin source 0.2.5 requires extension 0.2.5. Older workers return `CHROME_EXTENSION_VERSION_MISMATCH`, not fallback or unavailable. Policy artifact `0.2.1-alpha.4.browser-policy.1` is not a family-wide DSH release. Source declarations are not runtime proof.
 
 ## Annotations and drafts
 
