@@ -1,6 +1,6 @@
 {
   "name": "chrome",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": true,
   "description": "DSH plugin: drive background tabs in the current Chrome, and send a picked element into the composer.",
   "type": "module",
@@ -8,7 +8,8 @@
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",

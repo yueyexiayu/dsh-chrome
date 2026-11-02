@@ -4,7 +4,7 @@
 <p><strong>沿用 Chrome 登录态，在会话专属的后台标签组中工作。</strong></p>
 <p>DeepSeek Harness 桌面插件＋Chrome 扩展，不另开窗口、不使用调试端口接管现有标签。</p>
 <p><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
-<p><a href="package.json">插件 v0.2.5</a> · 扩展 v0.2.5 · <a href="LICENSE">MIT</a></p>
+<p><a href="package.json">插件 v0.2.6</a> · 扩展 v0.2.5 · <a href="LICENSE">MIT</a></p>
 <p><a href="#核心能力">核心能力</a> · <a href="#工作方式">工作方式</a> · <a href="#快速开始">快速开始</a> · <a href="#标注与草稿">标注与草稿</a> · <a href="#边界与维护">边界与维护</a> · <a href="#验证">验证</a></p>
 </div>
 
@@ -56,7 +56,7 @@ pnpm install --frozen-lockfile
 3. 保留扩展的调试提示；这是 Chrome 固定提示，不代表插件拉前台。调用 `chrome_browsers` 核对真实握手。
 4. 扩展文件更新后点扩展卡片的「重新加载」；Host/Client 更新后完整重启 DSH，并在新会话确认实际版本。
 
-源码插件0.2.5必须配扩展0.2.5；旧扩展返回 `CHROME_EXTENSION_VERSION_MISMATCH`，不降级或伪装 unavailable。共享 policy artifact 为 `0.2.1-alpha.4.browser-policy.1`，不是 DSH 全家族发布；源码声明不等于运行版本。
+源码插件0.2.6必须配扩展0.2.5；旧扩展返回 `CHROME_EXTENSION_VERSION_MISMATCH`，不降级或伪装 unavailable。共享 policy artifact 为 `0.2.1-alpha.4.browser-policy.1`，不是 DSH 全家族发布；源码声明不等于运行版本。
 
 ## 标注与草稿
 
