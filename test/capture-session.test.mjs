@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import test from "node:test";
-import { browserExecutionVersions, extensionExecution, validateExtensionEngine } from "../lib/execution.js";
+import { browserExecutionVersions, extensionExecution, isCompatibleExtensionVersion, validateExtensionEngine } from "../lib/execution.js";
 import { engine } from "./fixtures/engine.mjs";
 
 function browser({ deferCreate = false, failCloseOnce = false, deferClose = false, fastTimers = false, workerGeneration = "fixture-worker-1" } = {}) {
@@ -36,7 +36,7 @@ function browser({ deferCreate = false, failCloseOnce = false, deferClose = fals
     .replace(/^import[\s\S]*?;\n/gm, "").replace(/^export /gm, "")
     + "\nglobalThis.api = { openCaptureSession, exclusive, ensureBridge, shutdown, pages };";
   const context = {
-    browserExecutionVersions, extensionExecution, validateExtensionEngine,
+    browserExecutionVersions, extensionExecution, isCompatibleExtensionVersion, validateExtensionEngine,
     currentOwner: () => owner, connectBridge: async () => { connections++; return ws; },
     randomUUID: () => "fixture-id", setTimeout: (fn, ms) => setTimeout(fn, fastTimers ? Math.min(ms, 10) : ms), clearTimeout, AbortController, AbortSignal,
     WebSocket: { OPEN: 1, CONNECTING: 0 },

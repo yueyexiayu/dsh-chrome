@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { getEventListeners } from 'node:events';
-import { browserExecutionVersions, extensionExecution, validateExtensionEngine } from '../lib/execution.js';
+import { browserExecutionVersions, extensionExecution, isCompatibleExtensionVersion, validateExtensionEngine } from '../lib/execution.js';
 import { engine } from './fixtures/engine.mjs';
 
 const source = readFileSync(new URL('../lib/browser.js', import.meta.url), 'utf8')
@@ -26,7 +26,7 @@ function harness(options = {}) {
     close() { this.readyState = 3; for (const fn of this.handlers.close) fn(); }
   }
   const ctx = {
-    browserExecutionVersions, extensionExecution, validateExtensionEngine,
+    browserExecutionVersions, extensionExecution, isCompatibleExtensionVersion, validateExtensionEngine,
     currentOwner: () => owner, groupTitle: value => 'DSH ' + value,
     setTimeout: (fn, ms) => setTimeout(fn, options.fastTimers ? 5 : ms), clearTimeout,
     AbortController, AbortSignal, WebSocket: { OPEN: 1, CONNECTING: 0 },
@@ -38,9 +38,24 @@ function harness(options = {}) {
       const link = new Link(); links.push(link); return link;
     },
   };
-  vm.runInNewContext(source + '\nglobalThis.api = { Cdp, browsers, ensure, ensureBridge, openCaptureSession, exclusive, onBrowserEvent, pages, setBridge: value => { bridge = value; }, getBridge: () => bridge };', ctx);
+  vm.runInNewContext(source + '\nglobalThis.api = { Cdp, browsers, ensure, ensureBridge, openCaptureSession, exclusive, onBrowserEvent, pages, settleOwner, setBridge: value => { bridge = value; }, getBridge: () => bridge };', ctx);
   return { api: ctx.api, links, calls, attempts: () => attempts, owner: value => { owner = value; } };
 }
+
+test('owner cleanup accepts both compatible workers but rejects unknown versions before closing', async () => {
+  for (const version of ['0.2.5', '0.2.6', '0.2.7']) {
+    const h = harness(); let closed = false;
+    const record = { owner: 'owner-A', connection: { engine: { extensionVersion: version }, closed: false,
+      settleCreates: async () => {}, send: async method => { assert.equal(method, 'Browser.close'); closed = true; } } };
+    if (version === '0.2.7') {
+      await assert.rejects(h.api.settleOwner(record), /cleanup is unconfirmed/);
+      assert.equal(closed, false);
+    } else {
+      await h.api.settleOwner(record);
+      assert.equal(closed, true);
+    }
+  }
+});
 
 test('idle status performs a real hello without creating or discovering tabs', async () => {
   const h = harness(); const text = await h.api.browsers('list');
